@@ -11,8 +11,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"gmail-api-client/internal/oauth"
+
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 	"google.golang.org/api/gmail/v1"
 	"google.golang.org/api/option"
 )
@@ -236,43 +237,22 @@ func validateConfig(config *Config) error {
 func getGmailService(config *Config) (*gmail.Service, oauth2.TokenSource, error) {
 	log.Printf("Creating Gmail API service...")
 
-	// Create context with timeout for API operations
+	// Use shared oauth package to handle token refresh
+	freshToken, tokenSource, err := oauth.RefreshAndSaveToken(config.CredentialsFile, config.TokenFile)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Create OAuth2 client with background context
+	// The token source handles refresh independently
+	log.Printf("Creating OAuth2 HTTP client...")
+	client := oauth2.NewClient(context.Background(), tokenSource)
+
+	// Create Gmail service with timeout context for API operations
+	// This timeout applies to API calls, not token refresh
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(config.APITimeout)*time.Second)
 	defer cancel()
 
-	// Read credentials file
-	log.Printf("Reading credentials from: %s", config.CredentialsFile)
-	credentials, err := os.ReadFile(config.CredentialsFile)
-	if err != nil {
-		return nil, nil, fmt.Errorf("reading credentials file: %w", err)
-	}
-	log.Printf("Credentials loaded: %d bytes", len(credentials))
-
-	// Parse OAuth2 config
-	log.Printf("Parsing OAuth2 configuration...")
-	// Use gmail.modify scope which includes insert and settings.basic permissions
-	oauthConfig, err := google.ConfigFromJSON(credentials, gmail.GmailModifyScope)
-	if err != nil {
-		return nil, nil, fmt.Errorf("parsing credentials: %w", err)
-	}
-	log.Printf("OAuth2 config parsed successfully")
-
-	// Load token from file
-	log.Printf("Loading OAuth2 token from: %s", config.TokenFile)
-	token, err := loadToken(config.TokenFile)
-	if err != nil {
-		return nil, nil, fmt.Errorf("loading token: %w", err)
-	}
-	log.Printf("Token loaded, expiry: %s", token.Expiry)
-
-	// Create token source that will automatically refresh the token
-	tokenSource := oauthConfig.TokenSource(ctx, token)
-
-	// Create OAuth2 client
-	log.Printf("Creating OAuth2 HTTP client...")
-	client := oauth2.NewClient(ctx, tokenSource)
-
-	// Create Gmail service
 	log.Printf("Initializing Gmail API service...")
 	service, err := gmail.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
@@ -280,38 +260,10 @@ func getGmailService(config *Config) (*gmail.Service, oauth2.TokenSource, error)
 	}
 	log.Printf("Gmail API service created successfully")
 
+	// Update token reference in case it was refreshed
+	_ = freshToken
+
 	return service, tokenSource, nil
-}
-
-// loadToken reads an OAuth2 token from a file
-func loadToken(filename string) (*oauth2.Token, error) {
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		return nil, fmt.Errorf("reading token file: %w", err)
-	}
-
-	var token oauth2.Token
-	if err := json.Unmarshal(data, &token); err != nil {
-		return nil, fmt.Errorf("parsing token: %w", err)
-	}
-
-	return &token, nil
-}
-
-// saveToken writes an OAuth2 token to a file
-func saveToken(filename string, token *oauth2.Token) error {
-	log.Printf("Saving token to: %s", filename)
-	data, err := json.MarshalIndent(token, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshaling token: %w", err)
-	}
-
-	if err := os.WriteFile(filename, data, 0600); err != nil {
-		return fmt.Errorf("writing token file: %w", err)
-	}
-
-	log.Printf("Token saved successfully, expiry: %s", token.Expiry)
-	return nil
 }
 
 // testAPIConnection tests the Gmail API connection by calling getLanguage
@@ -325,7 +277,7 @@ func testAPIConnection(config *Config) error {
 	// Defer saving the token in case it was refreshed
 	defer func() {
 		if token, err := tokenSource.Token(); err == nil {
-			if err := saveToken(config.TokenFile, token); err != nil {
+			if err := oauth.SaveToken(config.TokenFile, token); err != nil {
 				log.Printf("WARNING: Failed to save refreshed token: %v", err)
 			}
 		}
@@ -358,7 +310,7 @@ func deliverMessage(config *Config, rawMessage []byte) error {
 	// Defer saving the token in case it was refreshed during API calls
 	defer func() {
 		if token, err := tokenSource.Token(); err == nil {
-			if err := saveToken(config.TokenFile, token); err != nil {
+			if err := oauth.SaveToken(config.TokenFile, token); err != nil {
 				log.Printf("WARNING: Failed to save refreshed token: %v", err)
 			}
 		}

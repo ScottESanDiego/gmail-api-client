@@ -2,13 +2,14 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
+
+	"gmail-api-client/internal/oauth"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -49,8 +50,8 @@ func main() {
 	// Get token from web using localhost server
 	token := getTokenFromWeb(config)
 
-	// Save token
-	if err := saveToken(tokenFile, token); err != nil {
+	// Save token using shared oauth package
+	if err := oauth.SaveToken(tokenFile, token); err != nil {
 		log.Fatalf("Unable to save token: %v", err)
 	}
 
@@ -141,15 +142,4 @@ func openBrowser(url string) {
 	if err != nil {
 		fmt.Printf("Unable to open browser automatically: %v\n", err)
 	}
-}
-
-// saveToken saves a token to a file
-func saveToken(filename string, token *oauth2.Token) error {
-	f, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	return json.NewEncoder(f).Encode(token)
 }

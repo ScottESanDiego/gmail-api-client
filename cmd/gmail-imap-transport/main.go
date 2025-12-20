@@ -10,8 +10,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"gmail-api-client/internal/oauth"
+
 	"github.com/emersion/go-imap/client"
-	"golang.org/x/oauth2"
 )
 
 // Config holds the application configuration
@@ -175,24 +176,15 @@ func validateConfig(config *Config) error {
 	return nil
 }
 
-// loadToken reads an OAuth2 token from a file
-func loadToken(filename string) (*oauth2.Token, error) {
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		return nil, fmt.Errorf("reading token file: %w", err)
-	}
-
-	var token oauth2.Token
-	if err := json.Unmarshal(data, &token); err != nil {
-		return nil, fmt.Errorf("parsing token: %w", err)
-	}
-
-	return &token, nil
-}
-
 // connectIMAP creates and authenticates an IMAP connection to Gmail
 func connectIMAP(config *Config) (*client.Client, error) {
 	log.Printf("Connecting to IMAP server: %s", config.IMAPServer)
+
+	// Use shared oauth package to handle token refresh
+	freshToken, _, err := oauth.RefreshAndSaveToken(config.CredentialsFile, config.TokenFile)
+	if err != nil {
+		return nil, err
+	}
 
 	// Connect to Gmail IMAP server with TLS
 	c, err := client.DialTLS(config.IMAPServer, nil)
@@ -202,37 +194,21 @@ func connectIMAP(config *Config) (*client.Client, error) {
 
 	log.Printf("Connected to IMAP server")
 
-	// Load OAuth2 token
-	log.Printf("Loading OAuth2 token from: %s", config.TokenFile)
-	token, err := loadToken(config.TokenFile)
-	if err != nil {
-		c.Logout()
-		return nil, fmt.Errorf("loading token: %w", err)
-	}
-
-	// Check if token is expired and needs refresh
-	if token.Expiry.Before(time.Now()) {
-		log.Printf("Token expired, attempting refresh...")
-		// In a real scenario, we'd refresh the token here
-		// For now, we'll just try to use it and let the server reject it if invalid
-	}
-
-	log.Printf("Token loaded, expiry: %s", token.Expiry)
-
 	// Determine the username (email address)
 	username := config.UserID
 	if username == "me" {
 		// We need the actual email address for XOAUTH2
 		// Try to extract from credentials or token file
 		// For now, we'll require the user to specify it
+		c.Logout()
 		return nil, fmt.Errorf("user_id must be a valid email address (not 'me') for IMAP authentication")
 	}
 
-	// Authenticate using XOAUTH2
+	// Authenticate using XOAUTH2 with the fresh token
 	log.Printf("Authenticating as: %s", username)
 	auth := &XOAuth2{
 		Username: username,
-		Token:    token.AccessToken,
+		Token:    freshToken.AccessToken,
 	}
 
 	if err := c.Authenticate(auth); err != nil {
