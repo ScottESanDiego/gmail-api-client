@@ -1,0 +1,11 @@
+{
+  "credentials_file": "credentials.json",
+  "token_file": "token.json",
+  "user_id": "me",
+  "verbose": false,
+  "not_spam": false,
+  "use_insert": false,
+  "api_timeout": 30,
+  "operation_timeout": 120,
+  "filter_delay": 2
+}

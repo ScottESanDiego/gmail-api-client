@@ -1,0 +1,37 @@
+# Ignore Go build artifacts in root directory only
+/gmail_api_transport
+/get-token
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+credentials/
+
+# Ignore test binary
+*.test
+
+# Ignore output of the go coverage tool
+*.out
+
+# Ignore dependency directories
+vendor/
+
+# Ignore sensitive files
+credentials.json
+token.json
+config.json
+
+# Keep example files
+!config.json.example
+
+# Ignore IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
