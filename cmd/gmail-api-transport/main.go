@@ -78,7 +78,7 @@ func main() {
 		log.SetOutput(io.Discard)
 	}
 
-	log.Printf("Starting gmail_api_transport")
+	log.Printf("Starting gmail-api-transport")
 	log.Printf("Config file: %s", configFile)
 
 	// Load configuration

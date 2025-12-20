@@ -15,7 +15,7 @@ import (
 	"google.golang.org/api/gmail/v1"
 )
 
-// This is a helper tool to obtain OAuth2 tokens for the gmail_api_transport.
+// This is a helper tool to obtain OAuth2 tokens for the gmail-api-transport.
 // Run this interactively to authorize the application and save the token.
 //
 // Usage: go run get_token.go <credentials.json> <token.json>
@@ -55,7 +55,7 @@ func main() {
 	}
 
 	fmt.Printf("Token saved to: %s\n", tokenFile)
-	fmt.Println("You can now use this token with the gmail_api_transport program.")
+	fmt.Println("You can now use this token with the gmail-api-transport program.")
 }
 
 // getTokenFromWeb requests a token from the web using a localhost callback server

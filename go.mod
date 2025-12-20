@@ -1,4 +1,4 @@
-module gmail_api_transport
+module gmail-api-client
 
 go 1.21
 

@@ -28,10 +28,10 @@ go mod download
 
 ```bash
 # Build the main transport
-go build -o gmail_api_transport cmd/gmail_api_transport/main.go
+go build -o gmail-api-transport cmd/gmail-api-transport/main.go
 
 # Build the token helper (for initial setup only)
-go build -o get-token cmd/get-token/main.go
+go build -o gmail-api-transport-get-token cmd/gmail-api-transport-get-token/main.go
 ```
 
 ### 3. Obtain OAuth2 Token (One-time Setup)
@@ -46,7 +46,7 @@ go build -o get-token cmd/get-token/main.go
 Run the interactive helper to authorize and save your token:
 
 ```bash
-./get-token credentials.json token.json
+./gmail-api-transport-get-token credentials.json token.json
 ```
 
 This will:
@@ -80,14 +80,14 @@ Edit `config.json` to match your setup:
 ```
 
 - `credentials_file`: Path to OAuth2 credentials from Google Cloud Console
-- `token_file`: Path to the token file created by `get-token`
+- `token_file`: Path to the token file created by `gmail-api-transport-get-token`
 - `user_id`: Gmail user ID ("me" for authenticated user, or specific email address)
 - `verbose`: Enable verbose logging (can be overridden with `-v` flag)
 - `not_spam`: Never mark messages as spam - only applies to Import API (can be overridden with `--not-spam` flag)
 - `use_insert`: Use Insert API instead of Import API to bypass scanning (can be overridden with `--use-insert` flag)
 
 - `credentials_file`: Path to OAuth2 credentials from Google Cloud Console
-- `token_file`: Path to the token file created by `get-token`
+- `token_file`: Path to the token file created by `gmail-api-transport-get-token`
 - `user_id`: Gmail user ID ("me" for authenticated user, or specific email address)
 
 ## Usage
@@ -97,7 +97,7 @@ Edit `config.json` to match your setup:
 Read an email message from a file:
 
 ```bash
-cat message.eml | ./gmail_api_transport config.json
+cat message.eml | ./gmail-api-transport config.json
 ```
 
 ### Verbose Mode
@@ -105,13 +105,13 @@ cat message.eml | ./gmail_api_transport config.json
 Enable verbose logging to see detailed information about the delivery process:
 
 ```bash
-cat message.eml | ./gmail_api_transport config.json -v
+cat message.eml | ./gmail-api-transport config.json -v
 ```
 
 Or use the long form:
 
 ```bash
-cat message.eml | ./gmail_api_transport config.json --verbose
+cat message.eml | ./gmail-api-transport config.json --verbose
 ```
 
 Verbose output includes:
@@ -126,7 +126,7 @@ Verbose output includes:
 To ensure messages are never marked as spam (ignoring Gmail's spam classifier):
 
 ```bash
-cat message.eml | ./gmail_api_transport config.json --not-spam
+cat message.eml | ./gmail-api-transport config.json --not-spam
 ```
 
 This sets the `neverMarkSpam` parameter in the Gmail API, which tells Gmail to bypass the spam classifier for this message. This is useful for automated mail delivery systems where you trust the source.
@@ -136,7 +136,7 @@ This sets the `neverMarkSpam` parameter in the Gmail API, which tells Gmail to b
 By default, the program uses the Gmail `import` API which performs standard email delivery scanning and classification similar to SMTP. To bypass most scanning and classification (similar to IMAP APPEND), use the `insert` API:
 
 ```bash
-cat message.eml | ./gmail_api_transport config.json --use-insert
+cat message.eml | ./gmail-api-transport config.json --use-insert
 ```
 
 **Key differences:**
@@ -148,8 +148,8 @@ Note: The `--not-spam` flag only works with the Import API (default). When using
 You can combine flags:
 
 ```bash
-cat message.eml | ./gmail_api_transport config.json --verbose --not-spam
-cat message.eml | ./gmail_api_transport config.json --verbose --use-insert
+cat message.eml | ./gmail-api-transport config.json --verbose --not-spam
+cat message.eml | ./gmail-api-transport config.json --verbose --use-insert
 ```
 
 ### Test API Connection
@@ -157,7 +157,7 @@ cat message.eml | ./gmail_api_transport config.json --verbose --use-insert
 To verify that your Gmail API credentials and OAuth token are working correctly without sending a message:
 
 ```bash
-./gmail_api_transport config.json --test-api
+./gmail-api-transport config.json --test-api
 ```
 
 This calls the Gmail API `users.settings.getLanguage` endpoint and displays the configured language for your Gmail account. It's useful for:
@@ -177,7 +177,7 @@ Display Language: en
 
 You can combine with verbose mode for more details:
 ```bash
-./gmail_api_transport config.json --test-api --verbose
+./gmail-api-transport config.json --test-api --verbose
 ```
 
 ### Integration with Exim
@@ -188,9 +188,9 @@ Add to your Exim configuration to deliver messages via Gmail API:
 # In /etc/exim4/exim4.conf.localmacros or similar
 
 # Transport definition
-gmail_api_transport:
+gmail-api-transport:
   driver = pipe
-  command = /path/to/gmail_api_transport /path/to/config.json
+  command = /path/to/gmail-api-transport /path/to/config.json
   user = mail
   return_fail_output = true
   temp_errors = *
@@ -199,11 +199,11 @@ gmail_api_transport:
 Then configure a router to use this transport:
 
 ```
-gmail_api_router:
+gmail-api-router:
   driver = accept
   domains = your-domain.com
   local_parts = specific-user
-  transport = gmail_api_transport
+  transport = gmail-api-transport
 ```
 
 ### Testing
@@ -211,7 +211,7 @@ gmail_api_router:
 Test with a simple message:
 
 ```bash
-cat << 'EOF' | ./gmail_api_transport config.json
+cat << 'EOF' | ./gmail-api-transport config.json
 From: sender@example.com
 To: recipient@example.com
 Subject: Test Message
