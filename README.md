@@ -56,13 +56,6 @@ go build -o gmail-api-transport-get-token cmd/gmail-api-transport-get-token/main
 
 ### 3. Obtain OAuth2 Token (One-time Setup)
 
-**Important**: Before running this step, you must configure the OAuth2 redirect URI in Google Cloud Console:
-
-1. Go to [Google Cloud Console - Credentials](https://console.cloud.google.com/apis/credentials)
-2. Click on your OAuth 2.0 Client ID
-3. Under "Authorized redirect URIs", add: `http://localhost:8080/oauth2callback`
-4. Click "Save"
-
 Run the interactive helper to authorize and save your token:
 
 ```bash
@@ -70,13 +63,12 @@ Run the interactive helper to authorize and save your token:
 ```
 
 This will:
-1. Start a local web server on port 8080
-2. Automatically open your browser to the Google authorization page
-3. Wait for you to authorize the application
-4. Automatically capture the authorization code when Google redirects back
-5. Exchange the code for a token and save it to `token.json`
+1. Display a Google authorization URL
+2. Wait for you to visit the URL in any web browser (on any device)
+3. Wait for you to paste the authorization code shown by Google
+4. Exchange the code for a token and save it to `token.json`
 
-If the browser doesn't open automatically, copy the URL shown in the terminal and paste it into your browser.
+**You can authorize from any device** - phone, tablet, or another computer. Just visit the URL displayed, authorize the application, and copy/paste the code back into the terminal.
 
 **Important**: Keep `token.json` secure. It provides access to your Gmail account.
 
