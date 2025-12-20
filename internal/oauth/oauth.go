@@ -88,6 +88,24 @@ func RefreshToken(tokenSource oauth2.TokenSource, originalToken *oauth2.Token) (
 	return freshToken, wasRefreshed, nil
 }
 
+// TokenChanged checks if two tokens are different (different access token or expiry)
+func TokenChanged(t1, t2 *oauth2.Token) bool {
+	if t1 == nil || t2 == nil {
+		return t1 != t2
+	}
+	return t1.AccessToken != t2.AccessToken || !t1.Expiry.Equal(t2.Expiry)
+}
+
+// SaveTokenIfChanged saves a token only if it differs from the original
+func SaveTokenIfChanged(filename string, originalToken, currentToken *oauth2.Token) error {
+	if !TokenChanged(originalToken, currentToken) {
+		log.Printf("Token unchanged, skipping save")
+		return nil
+	}
+	log.Printf("Token changed, saving to file...")
+	return SaveToken(filename, currentToken)
+}
+
 // RefreshAndSaveToken is a convenience function that refreshes a token and saves it if changed
 func RefreshAndSaveToken(credentialsFile, tokenFile string) (*oauth2.Token, oauth2.TokenSource, error) {
 	// Load OAuth config

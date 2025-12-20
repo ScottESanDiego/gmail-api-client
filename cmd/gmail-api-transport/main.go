@@ -269,16 +269,23 @@ func getGmailService(config *Config) (*gmail.Service, oauth2.TokenSource, error)
 // testAPIConnection tests the Gmail API connection by calling getLanguage
 func testAPIConnection(config *Config) error {
 	log.Printf("Creating Gmail API service for testing...")
+
+	// Load original token to compare later
+	originalToken, err := oauth.LoadToken(config.TokenFile)
+	if err != nil {
+		return fmt.Errorf("loading token: %w", err)
+	}
+
 	service, tokenSource, err := getGmailService(config)
 	if err != nil {
 		return fmt.Errorf("creating Gmail service: %w", err)
 	}
 
-	// Defer saving the token in case it was refreshed
+	// Defer saving the token only if it changed
 	defer func() {
 		if token, err := tokenSource.Token(); err == nil {
-			if err := oauth.SaveToken(config.TokenFile, token); err != nil {
-				log.Printf("WARNING: Failed to save refreshed token: %v", err)
+			if err := oauth.SaveTokenIfChanged(config.TokenFile, originalToken, token); err != nil {
+				log.Printf("WARNING: Failed to save token: %v", err)
 			}
 		}
 	}()
@@ -302,16 +309,23 @@ func testAPIConnection(config *Config) error {
 // deliverMessage delivers an email message to Gmail using either Import or Insert API
 func deliverMessage(config *Config, rawMessage []byte) error {
 	log.Printf("Preparing to deliver message...")
+
+	// Load original token to compare later
+	originalToken, err := oauth.LoadToken(config.TokenFile)
+	if err != nil {
+		return fmt.Errorf("loading token: %w", err)
+	}
+
 	service, tokenSource, err := getGmailService(config)
 	if err != nil {
 		return fmt.Errorf("creating Gmail service: %w", err)
 	}
 
-	// Defer saving the token in case it was refreshed during API calls
+	// Defer saving the token only if it changed
 	defer func() {
 		if token, err := tokenSource.Token(); err == nil {
-			if err := oauth.SaveToken(config.TokenFile, token); err != nil {
-				log.Printf("WARNING: Failed to save refreshed token: %v", err)
+			if err := oauth.SaveTokenIfChanged(config.TokenFile, originalToken, token); err != nil {
+				log.Printf("WARNING: Failed to save token: %v", err)
 			}
 		}
 	}()
