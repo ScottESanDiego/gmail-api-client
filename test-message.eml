@@ -1,0 +1,7 @@
+From: test@example.com
+To: recipient@example.com
+Subject: Test Message
+Date: Fri, 20 Dec 2025 09:00:00 +0000
+Message-ID: <test-12345@example.com>
+
+This is a test message for demonstrating the gmail transports.

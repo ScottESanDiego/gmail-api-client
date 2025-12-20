@@ -3,6 +3,7 @@ module gmail-api-client
 go 1.21
 
 require (
+	github.com/emersion/go-imap v1.2.1
 	golang.org/x/oauth2 v0.15.0
 	google.golang.org/api v0.154.0
 )
@@ -10,6 +11,7 @@ require (
 require (
 	cloud.google.com/go/compute v1.23.3 // indirect
 	cloud.google.com/go/compute/metadata v0.2.3 // indirect
+	github.com/emersion/go-sasl v0.0.0-20200509203442-7bfe0ed36a21 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.3.0 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect

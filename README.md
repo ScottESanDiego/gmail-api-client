@@ -1,13 +1,30 @@
-# Gmail API Transport
+# Gmail API/IMAP Transport
 
-A non-interactive Go program that reads email messages from stdin and imports them to Gmail using the Gmail API. Designed for integration with mail transfer agents like Exim.
+Non-interactive Go programs that read email messages from stdin and deliver them to Gmail. Designed for integration with mail transfer agents like Exim.
+
+## Programs
+
+This repository contains two transport programs:
+
+1. **gmail-api-transport** - Uses the Gmail API for delivery
+2. **gmail-imap-transport** - Uses IMAP APPEND for delivery
 
 ## Features
 
+### gmail-api-transport
 - Reads RFC 822 email messages from stdin
 - Uses Gmail API's `users.messages.import` to preserve original headers
 - Non-interactive operation using pre-authorized OAuth2 tokens
 - Configurable via JSON configuration file
+- Supports Insert API (bypass scanning) or Import API (standard delivery)
+
+### gmail-imap-transport
+- Reads RFC 822 email messages from stdin
+- Uses IMAP APPEND command to deliver messages
+- OAuth2 authentication via XOAUTH2 SASL mechanism
+- Non-interactive operation using pre-authorized OAuth2 tokens
+- Configurable via JSON configuration file
+- Gmail automatically applies filters and labels
 
 ## Prerequisites
 
@@ -27,8 +44,11 @@ go mod download
 ### 2. Build the Programs
 
 ```bash
-# Build the main transport
+# Build the Gmail API transport
 go build -o gmail-api-transport cmd/gmail-api-transport/main.go
+
+# Build the Gmail IMAP transport
+go build -o gmail-imap-transport cmd/gmail-imap-transport/main.go
 
 # Build the token helper (for initial setup only)
 go build -o gmail-api-transport-get-token cmd/gmail-api-transport-get-token/main.go
@@ -62,6 +82,8 @@ If the browser doesn't open automatically, copy the URL shown in the terminal an
 
 ### 4. Create Configuration File
 
+**For gmail-api-transport:**
+
 Copy the example configuration:
 
 ```bash
@@ -79,13 +101,43 @@ Edit `config.json` to match your setup:
 }
 ```
 
+**For gmail-imap-transport:**
+
+Copy the IMAP example configuration:
+
+```bash
+cp imap-config.json.example imap-config.json
+```
+
+Edit `imap-config.json` to match your setup (note: user_id must be your full email address):
+
+```json
+{
+  "credentials_file": "credentials.json",
+  "token_file": "token.json",
+  "user_id": "your-email@gmail.com",
+  "verbose": false,
+  "imap_server": "imap.gmail.com:993",
+  "connection_timeout": 30
+}
+```
+
+## Configuration Options
+
+**Common Configuration Options:**
 - `credentials_file`: Path to OAuth2 credentials from Google Cloud Console
 - `token_file`: Path to the token file created by `gmail-api-transport-get-token`
-- `user_id`: Gmail user ID ("me" for authenticated user, or specific email address)
 - `verbose`: Enable verbose logging (can be overridden with `-v` flag)
+
+**gmail-api-transport Specific:**
+- `user_id`: Gmail user ID ("me" for authenticated user, or specific email address)
 - `not_spam`: Never mark messages as spam - only applies to Import API (can be overridden with `--not-spam` flag)
 - `use_insert`: Use Insert API instead of Import API to bypass scanning (can be overridden with `--use-insert` flag)
 
+**gmail-imap-transport Specific:**
+- `user_id`: Gmail email address (must be full email, not "me")
+- `imap_server`: IMAP server address (default: "imap.gmail.com:993")
+- `connection_timeout`: Connection timeout in seconds (default: 30
 - `credentials_file`: Path to OAuth2 credentials from Google Cloud Console
 - `token_file`: Path to the token file created by `gmail-api-transport-get-token`
 - `user_id`: Gmail user ID ("me" for authenticated user, or specific email address)
@@ -94,10 +146,16 @@ Edit `config.json` to match your setup:
 
 ### Basic Usage
 
-Read an email message from a file:
+**Using Gmail API transport:**
 
 ```bash
 cat message.eml | ./gmail-api-transport config.json
+```
+
+**Using IMAP transport:**
+
+```bash
+cat message.eml | ./gmail-imap-transport config.json
 ```
 
 ### Verbose Mode
@@ -176,13 +234,9 @@ Display Language: en
 ```
 
 You can combine with verbose mode for more details:
-```bash
-./gmail-api-transport config.json --test-api --verbose
-```
+```bash:
 
-### Integration with Exim
-
-Add to your Exim configuration to deliver messages via Gmail API:
+**Option 1: Using Gmail API transport**
 
 ```
 # In /etc/exim4/exim4.conf.localmacros or similar
@@ -196,8 +250,28 @@ gmail-api-transport:
   temp_errors = *
 ```
 
-Then configure a router to use this transport:
+**Option 2: Using IMAP transport**
 
+```
+# In /etc/exim4/exim4.conf.localmacros or similar
+
+# Transport definition
+gmail-imap-transport:
+  driver = pipe
+  command = /path/to/gmail-imap-transport /path/to/config.json
+  user = mail
+  return_fail_output = true
+  temp_errors = *
+```
+
+Then configure a router to use one of these transports:
+
+```
+gmail-router:
+  driver = accept
+  domains = your-domain.com
+  local_parts = specific-user
+  transport = gmail-api-transport  # or gmail-imap
 ```
 gmail-api-router:
   driver = accept
@@ -258,24 +332,63 @@ The token file will be automatically refreshed when needed, so ensure the progra
 - Check JSON syntax in config file
 - Ensure referenced credential and token files exist
 
-### "Failed to import message"
+### gmail-api-transport: "Failed to import message"
 - Verify OAuth2 token is valid and not expired
 - Check that Gmail API is enabled in Google Cloud Console
-- Ensure the OAuth2 scope includes `https://www.googleapis.com/auth/gmail.insert`
+- Ensure the OAuth2 scope includes `https://www.googleapis.com/auth/gmail.modify`
 - Check Gmail API quota limits
+
+### gmail-imap-transport: "IMAP authentication failed"
+- Verify OAuth2 token is valid and not expired
+- Ensure user_id is set to your full email address (not "me")
+- Check that IMAP access is enabled in your Gmail settings
+- Verify the OAuth2 scope includes `https://mail.google.com/`
+- Check your Gmail account allows "less secure apps" or use OAuth2
+
+### gmail-imap-transport: "user_id must be a valid email address"
+- IMAP requires the full email address for authentication
+- Change `"user_id": "me"` to `"user_id": "your-email@gmail.com"` in your config
 
 ### "No message received from stdin"
 - Verify data is being piped correctly
 - Check Exim logs for pipe transport errors
 
-## API Scope
+## OAuth2 Scopes
 
-This program requires the following OAuth2 scope:
-- `https://www.googleapis.com/auth/gmail.insert` - Insert mail into Gmail mailbox
+**gmail-api-transport** requires:
+- `https://www.googleapis.com/auth/gmail.modify` - Read, compose, and send emails (includes insert and settings.basic)
 
-## License
+**gmail-imap-transport** requires:
+- `https://mail.google.com/` - Full mail access via IMAP/SMTP/POP
 
-MIT License
+Note: Both programs use the same OAuth2 token generated by `gmail-api-transport-get-token`, which uses the `gmail.modify` scope.
+Choosing Between API and IMAP Transport
+
+**Use gmail-api-transport when:**
+- You want more control over delivery (Import vs Insert API)
+- You need to bypass spam filtering (`--not-spam` flag)
+- You want to skip Gmail's scanning/classification (`--use-insert` flag)
+- You prefer REST API over IMAP protocol
+
+**Use gmail-imap-transport when:**
+- You prefer standard IMAP protocol
+- You want simpler implementation (less complex than API)
+- Your OAuth2 scope is `https://mail.google.com/` 
+- You want Gmail to automatically apply all filters and labels
+
+**Key Differences:**
+- **API Transport**: Uses Gmail REST API, more options for delivery control
+- **IMAP Transport**: Uses standard IMAP APPEND, simpler but less control
+- Both support OAuth2 authentication
+- Both preserve message headers and content
+- Both allow Gmail filters to run automatically (unless using Insert API with API transport)
+
+## References
+
+- [Gmail API Documentation](https://developers.google.com/gmail/api)
+- [Gmail API - Import Messages](https://developers.google.com/gmail/api/reference/rest/v1/users.messages/import)
+- [Gmail IMAP Extensions](https://developers.google.com/workspace/gmail/imap/imap-extensions)
+- [OAuth2 for IMAP (XOAUTH2)](https://developers.google.com/workspace/gmail/imap/xoauth2-protocol
 
 ## References
 

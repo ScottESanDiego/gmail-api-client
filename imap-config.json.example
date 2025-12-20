@@ -1,0 +1,8 @@
+{
+  "credentials_file": "credentials/credentials.json",
+  "token_file": "credentials/token.json",
+  "user_id": "your-email@gmail.com",
+  "verbose": false,
+  "imap_server": "imap.gmail.com:993",
+  "connection_timeout": 30
+}

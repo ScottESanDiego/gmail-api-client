@@ -232,8 +232,8 @@ func validateConfig(config *Config) error {
 	return nil
 }
 
-// getGmailService creates and returns a Gmail service client
-func getGmailService(config *Config) (*gmail.Service, error) {
+// getGmailService creates and returns a Gmail service client and token source
+func getGmailService(config *Config) (*gmail.Service, oauth2.TokenSource, error) {
 	log.Printf("Creating Gmail API service...")
 
 	// Create context with timeout for API operations
@@ -244,7 +244,7 @@ func getGmailService(config *Config) (*gmail.Service, error) {
 	log.Printf("Reading credentials from: %s", config.CredentialsFile)
 	credentials, err := os.ReadFile(config.CredentialsFile)
 	if err != nil {
-		return nil, fmt.Errorf("reading credentials file: %w", err)
+		return nil, nil, fmt.Errorf("reading credentials file: %w", err)
 	}
 	log.Printf("Credentials loaded: %d bytes", len(credentials))
 
@@ -253,7 +253,7 @@ func getGmailService(config *Config) (*gmail.Service, error) {
 	// Use gmail.modify scope which includes insert and settings.basic permissions
 	oauthConfig, err := google.ConfigFromJSON(credentials, gmail.GmailModifyScope)
 	if err != nil {
-		return nil, fmt.Errorf("parsing credentials: %w", err)
+		return nil, nil, fmt.Errorf("parsing credentials: %w", err)
 	}
 	log.Printf("OAuth2 config parsed successfully")
 
@@ -261,23 +261,26 @@ func getGmailService(config *Config) (*gmail.Service, error) {
 	log.Printf("Loading OAuth2 token from: %s", config.TokenFile)
 	token, err := loadToken(config.TokenFile)
 	if err != nil {
-		return nil, fmt.Errorf("loading token: %w", err)
+		return nil, nil, fmt.Errorf("loading token: %w", err)
 	}
 	log.Printf("Token loaded, expiry: %s", token.Expiry)
 
+	// Create token source that will automatically refresh the token
+	tokenSource := oauthConfig.TokenSource(ctx, token)
+
 	// Create OAuth2 client
 	log.Printf("Creating OAuth2 HTTP client...")
-	client := oauthConfig.Client(ctx, token)
+	client := oauth2.NewClient(ctx, tokenSource)
 
 	// Create Gmail service
 	log.Printf("Initializing Gmail API service...")
 	service, err := gmail.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
-		return nil, fmt.Errorf("creating Gmail service: %w", err)
+		return nil, nil, fmt.Errorf("creating Gmail service: %w", err)
 	}
 	log.Printf("Gmail API service created successfully")
 
-	return service, nil
+	return service, tokenSource, nil
 }
 
 // loadToken reads an OAuth2 token from a file
@@ -295,13 +298,38 @@ func loadToken(filename string) (*oauth2.Token, error) {
 	return &token, nil
 }
 
+// saveToken writes an OAuth2 token to a file
+func saveToken(filename string, token *oauth2.Token) error {
+	log.Printf("Saving token to: %s", filename)
+	data, err := json.MarshalIndent(token, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling token: %w", err)
+	}
+
+	if err := os.WriteFile(filename, data, 0600); err != nil {
+		return fmt.Errorf("writing token file: %w", err)
+	}
+
+	log.Printf("Token saved successfully, expiry: %s", token.Expiry)
+	return nil
+}
+
 // testAPIConnection tests the Gmail API connection by calling getLanguage
 func testAPIConnection(config *Config) error {
 	log.Printf("Creating Gmail API service for testing...")
-	service, err := getGmailService(config)
+	service, tokenSource, err := getGmailService(config)
 	if err != nil {
 		return fmt.Errorf("creating Gmail service: %w", err)
 	}
+
+	// Defer saving the token in case it was refreshed
+	defer func() {
+		if token, err := tokenSource.Token(); err == nil {
+			if err := saveToken(config.TokenFile, token); err != nil {
+				log.Printf("WARNING: Failed to save refreshed token: %v", err)
+			}
+		}
+	}()
 
 	log.Printf("Calling Gmail API users.settings.getLanguage for user: %s", config.UserID)
 	langSettings, err := service.Users.Settings.GetLanguage(config.UserID).Do()
@@ -322,10 +350,19 @@ func testAPIConnection(config *Config) error {
 // deliverMessage delivers an email message to Gmail using either Import or Insert API
 func deliverMessage(config *Config, rawMessage []byte) error {
 	log.Printf("Preparing to deliver message...")
-	service, err := getGmailService(config)
+	service, tokenSource, err := getGmailService(config)
 	if err != nil {
 		return fmt.Errorf("creating Gmail service: %w", err)
 	}
+
+	// Defer saving the token in case it was refreshed during API calls
+	defer func() {
+		if token, err := tokenSource.Token(); err == nil {
+			if err := saveToken(config.TokenFile, token); err != nil {
+				log.Printf("WARNING: Failed to save refreshed token: %v", err)
+			}
+		}
+	}()
 
 	// Encode message in base64url format (required by Gmail API)
 	log.Printf("Encoding message (%d bytes) to base64url...", len(rawMessage))
