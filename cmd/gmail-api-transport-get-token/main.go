@@ -1,12 +1,13 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
-	"strings"
+	"os/exec"
+	"runtime"
 
 	"gmail-api-client/internal/oauth"
 
@@ -24,7 +25,7 @@ func main() {
 	if len(os.Args) != 3 {
 		fmt.Fprintf(os.Stderr, "Usage: %s <credentials.json> <token.json>\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "\nInteractive OAuth2 flow to obtain and save a token.\n")
-		fmt.Fprintf(os.Stderr, "This uses the headless/manual authorization flow.\n")
+		fmt.Fprintf(os.Stderr, "This starts a local web server on port 8080 for the OAuth callback.\n")
 		os.Exit(1)
 	}
 
@@ -44,11 +45,10 @@ func main() {
 		log.Fatalf("Unable to parse credentials: %v", err)
 	}
 
-	// Use out-of-band (OOB) redirect for headless authorization
-	// This causes Google to display the code on a page for manual entry
-	config.RedirectURL = "urn:ietf:wg:oauth:2.0:oob"
+	// Use localhost redirect URL for production OAuth
+	config.RedirectURL = "http://localhost:8080/oauth2callback"
 
-	// Get token using manual authorization code entry
+	// Get token using localhost web server callback
 	token := getTokenFromWeb(config)
 
 	// Save token using shared oauth package
@@ -60,35 +60,66 @@ func main() {
 	fmt.Println("You can now use this token with the gmail-api-transport program.")
 }
 
-// getTokenFromWeb requests a token from the web using manual authorization code entry
+// getTokenFromWeb requests a token from the web using a local callback server
 func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
 	// Generate auth URL with offline access and force approval prompt
 	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
 
+	// Channels to receive the authorization code or error
+	codeChan := make(chan string)
+	errChan := make(chan error)
+
+	// Start local HTTP server to receive the callback
+	server := &http.Server{Addr: ":8080"}
+
+	http.HandleFunc("/oauth2callback", func(w http.ResponseWriter, r *http.Request) {
+		code := r.URL.Query().Get("code")
+		if code == "" {
+			errChan <- fmt.Errorf("no authorization code received")
+			http.Error(w, "No authorization code received", http.StatusBadRequest)
+			return
+		}
+
+		// Send success response to browser
+		fmt.Fprintf(w, "<html><body><h1>Authorization Successful!</h1><p>You can close this window and return to the terminal.</p></body></html>")
+
+		// Send code to main goroutine
+		codeChan <- code
+	})
+
+	// Start the server in a goroutine
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errChan <- fmt.Errorf("failed to start server: %w", err)
+		}
+	}()
+
 	fmt.Println("=================================================================")
 	fmt.Println("Gmail OAuth2 Authorization")
 	fmt.Println("=================================================================")
-	fmt.Println("\nPlease visit the following URL in your web browser:")
-	fmt.Println("(You can do this on any device - phone, tablet, another computer)")
-	fmt.Println()
+	fmt.Println("\nOpening your browser to authorize the application...")
+	fmt.Println("\nIf the browser doesn't open automatically, visit this URL:")
 	fmt.Println(authURL)
 	fmt.Println()
-	fmt.Println("After authorization, Google will display an authorization code.")
-	fmt.Print("\nEnter the authorization code here: ")
 
-	// Read authorization code from user
-	reader := bufio.NewReader(os.Stdin)
-	authCode, err := reader.ReadString('\n')
-	if err != nil {
-		log.Fatalf("Unable to read authorization code: %v", err)
-	}
-	authCode = strings.TrimSpace(authCode)
+	// Try to open the browser
+	openBrowser(authURL)
 
-	if authCode == "" {
-		log.Fatal("No authorization code provided")
+	// Wait for authorization code or error
+	var authCode string
+	select {
+	case authCode = <-codeChan:
+		fmt.Println("\n✓ Authorization code received!")
+	case err := <-errChan:
+		log.Fatalf("Error during authorization: %v", err)
 	}
 
-	fmt.Println("\nExchanging authorization code for access token...")
+	// Shutdown the server
+	if err := server.Shutdown(context.Background()); err != nil {
+		log.Printf("Warning: error shutting down server: %v", err)
+	}
+
+	fmt.Println("Exchanging authorization code for access token...")
 
 	// Exchange authorization code for token
 	token, err := config.Exchange(context.Background(), authCode)
@@ -99,4 +130,24 @@ func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
 	fmt.Println("✓ Token obtained successfully!")
 
 	return token
+}
+
+// openBrowser attempts to open the default browser to the specified URL
+func openBrowser(url string) {
+	var err error
+	switch runtime.GOOS {
+	case "linux":
+		err = exec.Command("xdg-open", url).Start()
+	case "windows":
+		err = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	case "darwin":
+		err = exec.Command("open", url).Start()
+	default:
+		err = fmt.Errorf("unsupported platform")
+	}
+
+	if err != nil {
+		log.Printf("Unable to open browser automatically: %v", err)
+		log.Println("Please open the URL manually in your browser.")
+	}
 }
