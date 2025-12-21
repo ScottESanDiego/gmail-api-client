@@ -97,7 +97,12 @@ Edit `config.json` to match your setup:
   "credentials_file": "credentials.json",
   "token_file": "token.json",
   "user_id": "me",
-  "verbose": false
+  "verbose": false,
+  "not_spam": false,
+  "use_insert": false,
+  "api_timeout": 30,
+  "operation_timeout": 120,
+  "filter_delay": 2
 }
 ```
 
@@ -113,8 +118,8 @@ Edit `imap-config.json` to match your setup (note: user_id must be your full ema
 
 ```json
 {
-  "credentials_file": "credentials.json",
-  "token_file": "token.json",
+  "credentials_file": "credentials/credentials.json",
+  "token_file": "credentials/token.json",
   "user_id": "your-email@gmail.com",
   "verbose": false,
   "imap_server": "imap.gmail.com:993",
@@ -133,6 +138,9 @@ Edit `imap-config.json` to match your setup (note: user_id must be your full ema
 - `user_id`: Gmail user ID ("me" for authenticated user, or specific email address)
 - `not_spam`: Never mark messages as spam - only applies to Import API (can be overridden with `--not-spam` flag)
 - `use_insert`: Use Insert API instead of Import API to bypass scanning (can be overridden with `--use-insert` flag)
+- `api_timeout`: Timeout for individual Gmail API calls in seconds (default: 30)
+- `operation_timeout`: Overall timeout for the entire operation in seconds (default: 120)
+- `filter_delay`: Delay in seconds to wait for Gmail filters to process after message delivery (default: 2)
 
 **gmail-imap-transport Specific:**
 - `user_id`: Gmail email address (must be full email, not "me")
