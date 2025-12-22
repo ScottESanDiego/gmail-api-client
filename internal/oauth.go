@@ -1,4 +1,4 @@
-package oauth
+package internal
 
 import (
 	"context"
@@ -80,7 +80,7 @@ func SaveToken(filename string, token *oauth2.Token, perm os.FileMode) error {
 		return fmt.Errorf("creating temp file: %w", err)
 	}
 	tempName := tempFile.Name()
-	
+
 	// Ensure temp file is cleaned up on error
 	defer func() {
 		if tempFile != nil {
@@ -187,14 +187,14 @@ func SaveTokenIfChanged(filename string, originalToken, currentToken *oauth2.Tok
 		return nil
 	}
 	log.Printf("Token changed, saving to file...")
-	
+
 	// Get original file permissions
 	perm, err := GetFilePermissions(filename)
 	if err != nil {
 		log.Printf("WARNING: Could not get original permissions, using 0600: %v", err)
 		perm = 0600
 	}
-	
+
 	return SaveToken(filename, currentToken, perm)
 }
 

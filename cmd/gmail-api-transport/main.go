@@ -3,34 +3,21 @@ package main
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
-	"log"
-	"math"
 	"os"
-	"path/filepath"
-	"strings"
 	"time"
 
-	"gmail-api-client/internal/oauth"
+	"gmail-api-client/internal"
 
 	"golang.org/x/oauth2"
 	"google.golang.org/api/gmail/v1"
-	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
 
 // Config holds the application configuration
 type Config struct {
-	// Path to OAuth2 credentials JSON file (from Google Cloud Console)
-	CredentialsFile string `json:"credentials_file"`
-	// Path to stored OAuth2 token file
-	TokenFile string `json:"token_file"`
-	// Gmail user ID (email address or "me" for authenticated user)
-	UserID string `json:"user_id"`
-	// Enable verbose logging
-	Verbose bool `json:"verbose"`
+	internal.Common
 	// Never mark as spam (ignore Gmail spam classifier)
 	NotSpam bool `json:"not_spam"`
 	// Use Insert instead of Import (bypasses scanning, similar to IMAP APPEND)
@@ -41,16 +28,15 @@ type Config struct {
 	OperationTimeout int `json:"operation_timeout"`
 	// Filter processing delay in seconds (default: 2)
 	FilterDelay int `json:"filter_delay"`
-	// Maximum retry attempts for transient failures (default: 3)
-	MaxRetries int `json:"max_retries"`
-	// Initial retry delay in seconds (default: 1)
-	RetryDelay int `json:"retry_delay"`
 }
 
-var verbose bool
-var neverMarkSpam bool
-var useInsert bool
-var testAPI bool
+var (
+	verbose       bool
+	neverMarkSpam bool
+	useInsert     bool
+	testAPI       bool
+	logger        *internal.Logger
+)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -80,247 +66,209 @@ func main() {
 		}
 	}
 
-	// Setup logging
-	log.SetFlags(log.LstdFlags)
-	if !verbose {
-		log.SetOutput(io.Discard)
+	// Initialize logger
+	logger = internal.NewLogger(verbose, "gmail-api-transport")
+	if verbose {
+		logger.SetOutput(os.Stderr)
 	}
 
-	log.Printf("Starting gmail-api-transport")
-	log.Printf("Config file: %s", configFile)
+	logger.Debug("starting gmail-api-transport", "config_file", configFile)
 
 	// Load configuration
-	config, err := loadConfig(configFile)
+	cfg, err := loadConfig(configFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: Failed to load config: %v\n", err)
-		os.Exit(1)
+		logger.Fatal("failed to load config", err)
 	}
 
 	// Validate configuration
-	if err := validateConfig(config); err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: Invalid configuration: %v\n", err)
-		os.Exit(1)
+	if err := validateConfig(cfg); err != nil {
+		logger.Fatal("invalid configuration", err)
 	}
 
 	// Override verbose setting if command line flag is set
 	if verbose {
-		config.Verbose = true
+		cfg.Verbose = true
 	}
 
 	// Override not-spam setting if command line flag is set
 	if neverMarkSpam {
-		config.NotSpam = true
+		cfg.NotSpam = true
 	}
 
 	// Override use-insert setting if command line flag is set
 	if useInsert {
-		config.UseInsert = true
+		cfg.UseInsert = true
 	}
 
-	log.Printf("Configuration loaded successfully")
-	log.Printf("  User ID: %s", config.UserID)
-	log.Printf("  Credentials file: %s", config.CredentialsFile)
-	log.Printf("  Token file: %s", config.TokenFile)
-	log.Printf("  Never mark spam: %v", config.NotSpam)
-	log.Printf("  Use Insert API: %v", config.UseInsert)
+	logger.Debug("configuration loaded successfully",
+		"user_id", cfg.UserID,
+		"not_spam", cfg.NotSpam,
+		"use_insert", cfg.UseInsert)
 
 	// If test-api mode, just test the API connection and exit
 	if testAPI {
-		log.Printf("Testing Gmail API connection...")
-		if err := testAPIConnection(config); err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: API test failed: %v\n", err)
-			os.Exit(1)
+		logger.Info("testing Gmail API connection")
+		if err := testAPIConnection(cfg); err != nil {
+			logger.Fatal("API test failed", err)
 		}
 		return
 	}
 
 	// Pre-validate and refresh token before reading message from stdin
 	// This ensures we don't read and lose a message if auth fails
-	log.Printf("Validating OAuth2 token before reading message...")
-	if err := validateAndRefreshToken(config); err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: Token validation failed: %v\n", err)
-		os.Exit(1)
+	logger.Debug("validating OAuth2 token before reading message")
+	if err := validateAndRefreshToken(cfg); err != nil {
+		logger.Fatal("token validation failed", err)
 	}
-	log.Printf("Token validated successfully")
+	logger.Debug("token validated successfully")
 
 	// Read email message from stdin
-	log.Printf("Reading message from stdin...")
+	logger.Debug("reading message from stdin")
 	message, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: Failed to read from stdin: %v\n", err)
-		os.Exit(1)
+		logger.Fatal("failed to read from stdin", err)
 	}
 
 	if len(message) == 0 {
-		fmt.Fprintf(os.Stderr, "ERROR: No message received from stdin\n")
-		os.Exit(1)
+		logger.Fatal("no message received from stdin", nil)
 	}
 
-	log.Printf("Message received: %d bytes", len(message))
+	logger.Debug("message received", "bytes", len(message))
 
 	// Deliver message to Gmail
-	if err := deliverMessage(config, message); err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: Failed to deliver message: %v\n", err)
-		os.Exit(1)
+	if err := deliverMessage(cfg, message); err != nil {
+		logger.Fatal("message delivery failed", err)
 	}
 
-	log.Printf("Message successfully delivered to Gmail")
-	fmt.Println("Message successfully imported to Gmail")
+	// Success message for Exim - first line of stdout
+	logger.Success("Message delivered successfully to Gmail")
 }
 
 // loadConfig reads and parses the configuration file
 func loadConfig(filename string) (*Config, error) {
-	log.Printf("Loading configuration from: %s", filename)
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		return nil, fmt.Errorf("reading config file: %w", err)
-	}
+	logger.Debug("loading configuration", "file", filename)
 
-	var config Config
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parsing config file: %w", err)
+	var cfg Config
+	if err := internal.LoadJSON(filename, &cfg); err != nil {
+		return nil, err
 	}
 
 	// Set defaults
-	if config.UserID == "" {
-		config.UserID = "me"
-		log.Printf("Using default user ID: me")
+	if cfg.UserID == "" {
+		cfg.UserID = "me"
+		logger.Debug("using default user ID", "user_id", "me")
 	}
 
 	// Expand relative paths
-	if !filepath.IsAbs(config.CredentialsFile) {
-		dir := filepath.Dir(filename)
-		config.CredentialsFile = filepath.Join(dir, config.CredentialsFile)
-		log.Printf("Expanded credentials file path: %s", config.CredentialsFile)
-	}
-	if !filepath.IsAbs(config.TokenFile) {
-		dir := filepath.Dir(filename)
-		config.TokenFile = filepath.Join(dir, config.TokenFile)
-		log.Printf("Expanded token file path: %s", config.TokenFile)
-	}
+	cfg.CredentialsFile = internal.ExpandPath(filename, cfg.CredentialsFile)
+	cfg.TokenFile = internal.ExpandPath(filename, cfg.TokenFile)
 
-	return &config, nil
+	logger.Debug("paths expanded",
+		"credentials_file", cfg.CredentialsFile,
+		"token_file", cfg.TokenFile)
+
+	return &cfg, nil
 }
 
 // validateAndRefreshToken validates the token and refreshes it if needed
 // This is called before reading message from stdin to avoid losing messages
-func validateAndRefreshToken(config *Config) error {
-	log.Printf("Loading and validating OAuth2 token...")
+func validateAndRefreshToken(cfg *Config) error {
+	logger.Debug("loading and validating OAuth2 token")
 
 	// Load original token to compare later
-	originalToken, err := oauth.LoadToken(config.TokenFile)
+	originalToken, err := internal.LoadToken(cfg.TokenFile)
 	if err != nil {
 		return fmt.Errorf("loading token: %w", err)
 	}
 
 	// Load OAuth config
-	oauthConfig, err := oauth.LoadOAuthConfig(config.CredentialsFile)
+	oauthConfig, err := internal.LoadOAuthConfig(cfg.CredentialsFile)
 	if err != nil {
 		return fmt.Errorf("loading OAuth config: %w", err)
 	}
 
 	// Create token source
-	tokenSource := oauth.CreateTokenSource(oauthConfig, originalToken)
+	tokenSource := internal.CreateTokenSource(oauthConfig, originalToken)
 
 	// Get fresh token (auto-refreshes if needed)
-	freshToken, wasRefreshed, err := oauth.RefreshToken(tokenSource, originalToken)
+	freshToken, wasRefreshed, err := internal.RefreshToken(tokenSource, originalToken)
 	if err != nil {
 		return fmt.Errorf("refreshing token: %w", err)
 	}
 
 	// Save if refreshed, preserving original permissions
 	if wasRefreshed {
-		log.Printf("Token was refreshed, saving to file...")
-		if err := oauth.SaveTokenIfChanged(config.TokenFile, originalToken, freshToken); err != nil {
+		logger.Debug("token was refreshed, saving to file")
+		if err := internal.SaveTokenIfChanged(cfg.TokenFile, originalToken, freshToken); err != nil {
 			return fmt.Errorf("saving refreshed token: %w", err)
 		}
-		log.Printf("Refreshed token saved successfully")
+		logger.Debug("refreshed token saved successfully")
 	}
 
 	return nil
 }
 
 // validateConfig validates the configuration and sets defaults
-func validateConfig(config *Config) error {
-	log.Printf("Validating configuration...")
+func validateConfig(cfg *Config) error {
+	logger.Debug("validating configuration")
 
-	// Validate required fields
-	if config.CredentialsFile == "" {
-		return fmt.Errorf("credentials_file is required")
-	}
-	if config.TokenFile == "" {
-		return fmt.Errorf("token_file is required")
-	}
-
-	// Check if files exist
-	if _, err := os.Stat(config.CredentialsFile); os.IsNotExist(err) {
-		return fmt.Errorf("credentials file not found: %s", config.CredentialsFile)
-	}
-	if _, err := os.Stat(config.TokenFile); os.IsNotExist(err) {
-		return fmt.Errorf("token file not found: %s", config.TokenFile)
+	// Validate common fields
+	if err := internal.ValidateCommon(&cfg.Common); err != nil {
+		return err
 	}
 
 	// Set timeout defaults if not specified
-	if config.APITimeout <= 0 {
-		config.APITimeout = 30
-		log.Printf("Using default API timeout: %d seconds", config.APITimeout)
-	}
-	if config.OperationTimeout <= 0 {
-		config.OperationTimeout = 120
-		log.Printf("Using default operation timeout: %d seconds", config.OperationTimeout)
-	}
-	if config.FilterDelay <= 0 {
-		config.FilterDelay = 2
-		log.Printf("Using default filter delay: %d seconds", config.FilterDelay)
-	}
-	if config.MaxRetries <= 0 {
-		config.MaxRetries = 3
-		log.Printf("Using default max retries: %d", config.MaxRetries)
-	}
-	if config.RetryDelay <= 0 {
-		config.RetryDelay = 1
-		log.Printf("Using default retry delay: %d seconds", config.RetryDelay)
-	}
+	internal.SetDefaults(&cfg.APITimeout, 30)
+	internal.SetDefaults(&cfg.OperationTimeout, 120)
+	internal.SetDefaults(&cfg.FilterDelay, 2)
+
+	logger.Debug("defaults applied",
+		"api_timeout", cfg.APITimeout,
+		"operation_timeout", cfg.OperationTimeout,
+		"filter_delay", cfg.FilterDelay,
+		"max_retries", cfg.MaxRetries,
+		"retry_delay", cfg.RetryDelay)
 
 	// Validate timeout values are reasonable
-	if config.APITimeout > config.OperationTimeout {
-		return fmt.Errorf("api_timeout (%d) cannot be greater than operation_timeout (%d)",
-			config.APITimeout, config.OperationTimeout)
-	}
-	if config.FilterDelay > 30 {
-		return fmt.Errorf("filter_delay (%d) is too large (max 30 seconds)", config.FilterDelay)
+	if err := internal.ValidateTimeout(cfg.APITimeout, cfg.OperationTimeout); err != nil {
+		return err
 	}
 
-	log.Printf("Configuration validated successfully")
+	// Validate delay
+	if err := internal.ValidateDelay(cfg.FilterDelay, 30, "filter_delay"); err != nil {
+		return err
+	}
+
+	logger.Debug("configuration validated successfully")
 	return nil
 }
 
 // getGmailService creates and returns a Gmail service client and token source
-func getGmailService(config *Config) (*gmail.Service, oauth2.TokenSource, error) {
-	log.Printf("Creating Gmail API service...")
+func getGmailService(cfg *Config) (*gmail.Service, oauth2.TokenSource, error) {
+	logger.Debug("creating Gmail API service")
 
 	// Use shared oauth package to handle token refresh
-	freshToken, tokenSource, err := oauth.RefreshAndSaveToken(config.CredentialsFile, config.TokenFile)
+	freshToken, tokenSource, err := internal.RefreshAndSaveToken(cfg.CredentialsFile, cfg.TokenFile)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	// Create OAuth2 client with background context
 	// The token source handles refresh independently
-	log.Printf("Creating OAuth2 HTTP client...")
+	logger.Debug("creating OAuth2 HTTP client")
 	client := oauth2.NewClient(context.Background(), tokenSource)
 
 	// Create Gmail service with timeout context for API operations
 	// This timeout applies to API calls, not token refresh
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(config.APITimeout)*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.APITimeout)*time.Second)
 	defer cancel()
 
-	log.Printf("Initializing Gmail API service...")
+	logger.Debug("initializing Gmail API service")
 	service, err := gmail.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating Gmail service: %w", err)
 	}
-	log.Printf("Gmail API service created successfully")
+	logger.Debug("Gmail API service created successfully")
 
 	// Update token reference in case it was refreshed
 	_ = freshToken
@@ -329,16 +277,16 @@ func getGmailService(config *Config) (*gmail.Service, oauth2.TokenSource, error)
 }
 
 // testAPIConnection tests the Gmail API connection by calling getLanguage
-func testAPIConnection(config *Config) error {
-	log.Printf("Creating Gmail API service for testing...")
+func testAPIConnection(cfg *Config) error {
+	logger.Debug("creating Gmail API service for testing")
 
 	// Load original token to compare later
-	originalToken, err := oauth.LoadToken(config.TokenFile)
+	originalToken, err := internal.LoadToken(cfg.TokenFile)
 	if err != nil {
 		return fmt.Errorf("loading token: %w", err)
 	}
 
-	service, tokenSource, err := getGmailService(config)
+	service, tokenSource, err := getGmailService(cfg)
 	if err != nil {
 		return fmt.Errorf("creating Gmail service: %w", err)
 	}
@@ -346,126 +294,39 @@ func testAPIConnection(config *Config) error {
 	// Defer saving the token only if it changed
 	defer func() {
 		if token, err := tokenSource.Token(); err == nil {
-			if err := oauth.SaveTokenIfChanged(config.TokenFile, originalToken, token); err != nil {
-				log.Printf("WARNING: Failed to save token: %v", err)
+			if err := internal.SaveTokenIfChanged(cfg.TokenFile, originalToken, token); err != nil {
+				logger.Warn("failed to save token", "error", err)
 			}
 		}
 	}()
 
-	log.Printf("Calling Gmail API users.settings.getLanguage for user: %s", config.UserID)
-	langSettings, err := service.Users.Settings.GetLanguage(config.UserID).Do()
+	logger.Debug("calling Gmail API users.settings.getLanguage", "user_id", cfg.UserID)
+	langSettings, err := service.Users.Settings.GetLanguage(cfg.UserID).Do()
 	if err != nil {
 		return fmt.Errorf("calling getLanguage: %w", err)
 	}
 
-	log.Printf("API test successful!")
+	logger.Info("API test successful")
 	fmt.Println("\n=== Gmail API Connection Test ===")
 	fmt.Println("Status: SUCCESS")
-	fmt.Printf("User ID: %s\n", config.UserID)
+	fmt.Printf("User ID: %s\n", cfg.UserID)
 	fmt.Printf("Display Language: %s\n", langSettings.DisplayLanguage)
 	fmt.Println("=================================")
 
 	return nil
 }
 
-// isRetryableError determines if an error is transient and should be retried
-func isRetryableError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	// Check for Google API errors
-	if apiErr, ok := err.(*googleapi.Error); ok {
-		// Retry on rate limit, server errors, and service unavailable
-		// 429 - Too Many Requests (rate limit)
-		// 500 - Internal Server Error
-		// 502 - Bad Gateway
-		// 503 - Service Unavailable
-		// 504 - Gateway Timeout
-		return apiErr.Code == 429 || apiErr.Code >= 500
-	}
-
-	// Check for context deadline exceeded (timeout)
-	errStr := err.Error()
-	if strings.Contains(errStr, "context deadline exceeded") {
-		return true
-	}
-
-	// Check for network errors
-	if strings.Contains(errStr, "connection refused") ||
-		strings.Contains(errStr, "connection reset") ||
-		strings.Contains(errStr, "timeout") ||
-		strings.Contains(errStr, "temporary failure") ||
-		strings.Contains(errStr, "i/o timeout") {
-		return true
-	}
-
-	// OAuth token refresh errors are not retryable at this level
-	// (they should be handled before message delivery)
-	if strings.Contains(errStr, "oauth2") || strings.Contains(errStr, "token") {
-		return false
-	}
-
-	return false
-}
-
-// calculateBackoff calculates exponential backoff delay
-func calculateBackoff(attempt int, baseDelay int) time.Duration {
-	// Exponential backoff: baseDelay * 2^attempt
-	// With jitter to avoid thundering herd
-	backoff := float64(baseDelay) * math.Pow(2, float64(attempt))
-	// Cap at 60 seconds
-	if backoff > 60 {
-		backoff = 60
-	}
-	return time.Duration(backoff) * time.Second
-}
-
-// retryOperation executes an operation with exponential backoff retry logic
-func retryOperation(config *Config, operation func() error, operationName string) error {
-	var lastErr error
-
-	for attempt := 0; attempt <= config.MaxRetries; attempt++ {
-		if attempt > 0 {
-			backoff := calculateBackoff(attempt-1, config.RetryDelay)
-			log.Printf("Retry attempt %d/%d for %s after %v", attempt, config.MaxRetries, operationName, backoff)
-			time.Sleep(backoff)
-		}
-
-		err := operation()
-		if err == nil {
-			if attempt > 0 {
-				log.Printf("%s succeeded after %d retries", operationName, attempt)
-			}
-			return nil
-		}
-
-		lastErr = err
-
-		if !isRetryableError(err) {
-			log.Printf("%s failed with non-retryable error: %v", operationName, err)
-			return err
-		}
-
-		log.Printf("%s failed with retryable error (attempt %d/%d): %v",
-			operationName, attempt+1, config.MaxRetries+1, err)
-	}
-
-	log.Printf("%s failed after %d attempts", operationName, config.MaxRetries+1)
-	return fmt.Errorf("max retries exceeded: %w", lastErr)
-}
-
 // deliverMessage delivers an email message to Gmail using either Import or Insert API
-func deliverMessage(config *Config, rawMessage []byte) error {
-	log.Printf("Preparing to deliver message...")
+func deliverMessage(cfg *Config, rawMessage []byte) error {
+	logger.Debug("preparing to deliver message")
 
 	// Load original token to compare later
-	originalToken, err := oauth.LoadToken(config.TokenFile)
+	originalToken, err := internal.LoadToken(cfg.TokenFile)
 	if err != nil {
 		return fmt.Errorf("loading token: %w", err)
 	}
 
-	service, tokenSource, err := getGmailService(config)
+	service, tokenSource, err := getGmailService(cfg)
 	if err != nil {
 		return fmt.Errorf("creating Gmail service: %w", err)
 	}
@@ -473,16 +334,16 @@ func deliverMessage(config *Config, rawMessage []byte) error {
 	// Defer saving the token only if it changed
 	defer func() {
 		if token, err := tokenSource.Token(); err == nil {
-			if err := oauth.SaveTokenIfChanged(config.TokenFile, originalToken, token); err != nil {
-				log.Printf("WARNING: Failed to save token: %v", err)
+			if err := internal.SaveTokenIfChanged(cfg.TokenFile, originalToken, token); err != nil {
+				logger.Warn("failed to save token", "error", err)
 			}
 		}
 	}()
 
 	// Encode message in base64url format (required by Gmail API)
-	log.Printf("Encoding message (%d bytes) to base64url...", len(rawMessage))
+	logger.Debug("encoding message to base64url", "bytes", len(rawMessage))
 	encodedMessage := base64.URLEncoding.EncodeToString(rawMessage)
-	log.Printf("Encoded message size: %d bytes", len(encodedMessage))
+	logger.Debug("message encoded", "encoded_bytes", len(encodedMessage))
 
 	// Create the message object without labels - let Gmail apply filters first
 	message := &gmail.Message{
@@ -492,29 +353,36 @@ func deliverMessage(config *Config, rawMessage []byte) error {
 	var result *gmail.Message
 
 	// Wrap the API call in retry logic
-	err = retryOperation(config, func() error {
+	retryCfg := &internal.RetryConfig{
+		MaxRetries: cfg.MaxRetries,
+		RetryDelay: cfg.RetryDelay,
+	}
+
+	err = internal.RetryOperation(retryCfg, logger, func() error {
 		var apiErr error
 
-		if config.UseInsert {
+		if cfg.UseInsert {
 			// Use Insert API - bypasses most scanning and classification (like IMAP APPEND)
-			log.Printf("Calling Gmail API users.messages.insert for user: %s", config.UserID)
-			log.Printf("Insert bypasses most scanning and classification")
+			logger.Debug("calling Gmail API users.messages.insert", "user_id", cfg.UserID)
+			logger.Info("using Insert API (bypasses scanning)")
 
-			call := service.Users.Messages.Insert(config.UserID, message).
+			call := service.Users.Messages.Insert(cfg.UserID, message).
 				InternalDateSource("dateHeader")
 
 			result, apiErr = call.Do()
 		} else {
 			// Use Import API - performs standard email delivery scanning and classification
-			log.Printf("Calling Gmail API users.messages.import for user: %s", config.UserID)
-			if config.NotSpam {
-				log.Printf("Setting neverMarkSpam=true to bypass Gmail spam classifier")
+			logger.Debug("calling Gmail API users.messages.import", "user_id", cfg.UserID)
+			if cfg.NotSpam {
+				logger.Info("using Import API with neverMarkSpam=true")
+			} else {
+				logger.Info("using Import API (standard delivery)")
 			}
 
-			call := service.Users.Messages.Import(config.UserID, message).
+			call := service.Users.Messages.Import(cfg.UserID, message).
 				InternalDateSource("dateHeader")
 
-			if config.NotSpam {
+			if cfg.NotSpam {
 				call = call.NeverMarkSpam(true)
 			}
 
@@ -528,38 +396,37 @@ func deliverMessage(config *Config, rawMessage []byte) error {
 		return fmt.Errorf("delivering message: %w", err)
 	}
 
-	log.Printf("Message delivered successfully")
-	log.Printf("  Message ID: %s", result.Id)
-	log.Printf("  Thread ID: %s", result.ThreadId)
+	logger.Info("message delivered successfully",
+		"message_id", result.Id,
+		"thread_id", result.ThreadId)
 	if len(result.LabelIds) > 0 {
-		log.Printf("  Labels: %v", result.LabelIds)
+		logger.Debug("initial labels", "labels", result.LabelIds)
 	}
 
 	// Wait for Gmail filters to apply (labels may be applied asynchronously)
-	filterDelay := time.Duration(config.FilterDelay) * time.Second
-	log.Printf("Waiting %v for Gmail filters to process...", filterDelay)
+	filterDelay := time.Duration(cfg.FilterDelay) * time.Second
+	logger.Debug("waiting for Gmail filters to process", "delay", filterDelay)
 	time.Sleep(filterDelay)
 
 	// Re-fetch the message to get updated labels after filters have run
 	// Wrap in retry logic
-	err = retryOperation(config, func() error {
+	err = internal.RetryOperation(retryCfg, logger, func() error {
 		var fetchErr error
-		result, fetchErr = service.Users.Messages.Get(config.UserID, result.Id).Format("metadata").Do()
+		result, fetchErr = service.Users.Messages.Get(cfg.UserID, result.Id).Format("metadata").Do()
 		return fetchErr
 	}, "message re-fetch")
 
 	if err != nil {
 		// Non-fatal: continue even if re-fetch fails
-		log.Printf("WARNING: Failed to re-fetch message: %v", err)
-		log.Printf("WARNING: Continuing with original labels")
+		logger.Warn("failed to re-fetch message, continuing with original labels", "error", err)
 	} else {
-		log.Printf("Labels after filter processing: %v", result.LabelIds)
+		logger.Debug("labels after filter processing", "labels", result.LabelIds)
 	}
 
 	// Attempt to apply labels - failures are non-fatal
-	if err := applyLabels(service, config, result); err != nil {
+	if err := applyLabels(service, cfg, result); err != nil {
 		// Log warning but don't fail the delivery
-		log.Printf("WARNING: Label modification had issues: %v", err)
+		logger.Warn("label modification had issues", "error", err)
 		fmt.Fprintf(os.Stderr, "WARNING: Message delivered but label modification failed: %v\n", err)
 	}
 
@@ -567,7 +434,7 @@ func deliverMessage(config *Config, rawMessage []byte) error {
 }
 
 // applyLabels applies INBOX and UNREAD labels as needed
-func applyLabels(service *gmail.Service, config *Config, result *gmail.Message) error {
+func applyLabels(service *gmail.Service, cfg *Config, result *gmail.Message) error {
 	// Check if Gmail applied any user labels (from filters)
 	// If not, add INBOX label so message appears in inbox
 	hasUserLabel := false
@@ -591,21 +458,26 @@ func applyLabels(service *gmail.Service, config *Config, result *gmail.Message) 
 		}
 	}
 
+	retryCfg := &internal.RetryConfig{
+		MaxRetries: cfg.MaxRetries,
+		RetryDelay: cfg.RetryDelay,
+	}
+
 	if !hasUserLabel && !hasInbox {
-		log.Printf("No user labels applied, adding INBOX label")
+		logger.Debug("no user labels applied, adding INBOX label")
 		// Add INBOX and UNREAD labels to the message with retry logic
-		err := retryOperation(config, func() error {
+		err := internal.RetryOperation(retryCfg, logger, func() error {
 			modifyReq := &gmail.ModifyMessageRequest{
 				AddLabelIds: []string{"INBOX", "UNREAD"},
 			}
-			_, modifyErr := service.Users.Messages.Modify(config.UserID, result.Id, modifyReq).Do()
+			_, modifyErr := service.Users.Messages.Modify(cfg.UserID, result.Id, modifyReq).Do()
 			return modifyErr
 		}, "add INBOX and UNREAD labels")
 
 		if err != nil {
 			return fmt.Errorf("failed to add INBOX and UNREAD labels: %w", err)
 		}
-		log.Printf("INBOX and UNREAD labels added successfully")
+		logger.Debug("INBOX and UNREAD labels added successfully")
 	} else {
 		// Even if message has labels or is in INBOX, ensure it's marked UNREAD
 		hasUnread := false
@@ -617,19 +489,19 @@ func applyLabels(service *gmail.Service, config *Config, result *gmail.Message) 
 		}
 
 		if !hasUnread {
-			log.Printf("Adding UNREAD label")
-			err := retryOperation(config, func() error {
+			logger.Debug("adding UNREAD label")
+			err := internal.RetryOperation(retryCfg, logger, func() error {
 				modifyReq := &gmail.ModifyMessageRequest{
 					AddLabelIds: []string{"UNREAD"},
 				}
-				_, modifyErr := service.Users.Messages.Modify(config.UserID, result.Id, modifyReq).Do()
+				_, modifyErr := service.Users.Messages.Modify(cfg.UserID, result.Id, modifyReq).Do()
 				return modifyErr
 			}, "add UNREAD label")
 
 			if err != nil {
 				return fmt.Errorf("failed to add UNREAD label: %w", err)
 			}
-			log.Printf("UNREAD label added successfully")
+			logger.Debug("UNREAD label added successfully")
 		}
 	}
 

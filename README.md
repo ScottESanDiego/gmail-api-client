@@ -171,6 +171,13 @@ Both transport programs include robust reliability features designed for product
 - Smart error classification distinguishes retryable from permanent failures
 - All failures exit with code 1 for Exim compatibility
 
+### Structured Logging
+- Built-in structured logging with key-value pairs for better debugging
+- Verbose mode (`-v` flag) provides detailed operation logs to stderr
+- Non-verbose mode minimizes output for production use
+- **First line of output is always useful for Exim logging** (success/failure state)
+- Error messages to stderr are clear and actionable
+
 ### Token Validation and Refresh
 - OAuth2 token is validated and refreshed **before** reading message from stdin
 - Prevents message loss due to expired tokens
@@ -187,6 +194,14 @@ Both transport programs include robust reliability features designed for product
 - IMAP transport enforces connection timeout at TCP level
 - Predictable timeout behavior prevents hanging on network issues
 - Connections are properly cleaned up on both success and failure
+
+### Modular Architecture
+- Shared retry logic in `internal/retry.go` for consistency
+- Structured logging in `internal/logging.go`
+- Configuration validation helpers in `internal/config.go`
+- OAuth token handling in `internal/oauth.go`
+- Clean separation of concerns for maintainability
+- All internal packages consolidated in single directory for simplicity
 
 ## Usage
 
@@ -224,6 +239,10 @@ Verbose output includes:
 - Message size and encoding details
 - Gmail API call progress
 - Message ID and thread ID upon successful import
+- Retry attempts and backoff delays
+- Structured key-value pairs for all operations
+
+In non-verbose mode, only critical errors and the final success/failure message are shown. The **first line of output** is always a clear success or failure message, which is ideal for Exim's log format (Exim only logs the first line of stdout).
 
 ### Bypass Spam Filter
 
