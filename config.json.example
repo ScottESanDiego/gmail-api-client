@@ -7,5 +7,7 @@
   "use_insert": false,
   "api_timeout": 30,
   "operation_timeout": 120,
-  "filter_delay": 2
+  "filter_delay": 2,
+  "max_retries": 3,
+  "retry_delay": 1
 }

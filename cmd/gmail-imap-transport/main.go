@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gmail-api-client/internal/oauth"
@@ -29,6 +32,10 @@ type Config struct {
 	IMAPServer string `json:"imap_server"`
 	// Connection timeout in seconds (default: 30)
 	ConnectionTimeout int `json:"connection_timeout"`
+	// Maximum retry attempts for transient failures (default: 3)
+	MaxRetries int `json:"max_retries"`
+	// Initial retry delay in seconds (default: 1)
+	RetryDelay int `json:"retry_delay"`
 }
 
 var verbose bool
@@ -83,6 +90,15 @@ func main() {
 	log.Printf("  IMAP Server: %s", config.IMAPServer)
 	log.Printf("  Token file: %s", config.TokenFile)
 
+	// Pre-validate and refresh token before reading message from stdin
+	// This ensures we don't read and lose a message if auth fails
+	log.Printf("Validating OAuth2 token before reading message...")
+	if err := validateAndRefreshToken(config); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: Token validation failed: %v\n", err)
+		os.Exit(1)
+	}
+	log.Printf("Token validated successfully")
+
 	// Read email message from stdin
 	log.Printf("Reading message from stdin...")
 	message, err := io.ReadAll(os.Stdin)
@@ -136,6 +152,14 @@ func loadConfig(filename string) (*Config, error) {
 		config.ConnectionTimeout = 30
 		log.Printf("Using default connection timeout: %d seconds", config.ConnectionTimeout)
 	}
+	if config.MaxRetries <= 0 {
+		config.MaxRetries = 3
+		log.Printf("Using default max retries: %d", config.MaxRetries)
+	}
+	if config.RetryDelay <= 0 {
+		config.RetryDelay = 1
+		log.Printf("Using default retry delay: %d seconds", config.RetryDelay)
+	}
 
 	// Expand relative paths
 	if !filepath.IsAbs(config.CredentialsFile) {
@@ -150,6 +174,44 @@ func loadConfig(filename string) (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+// validateAndRefreshToken validates the token and refreshes it if needed
+// This is called before reading message from stdin to avoid losing messages
+func validateAndRefreshToken(config *Config) error {
+	log.Printf("Loading and validating OAuth2 token...")
+	
+	// Load original token to compare later
+	originalToken, err := oauth.LoadToken(config.TokenFile)
+	if err != nil {
+		return fmt.Errorf("loading token: %w", err)
+	}
+
+	// Load OAuth config
+	oauthConfig, err := oauth.LoadOAuthConfig(config.CredentialsFile)
+	if err != nil {
+		return fmt.Errorf("loading OAuth config: %w", err)
+	}
+
+	// Create token source
+	tokenSource := oauth.CreateTokenSource(oauthConfig, originalToken)
+
+	// Get fresh token (auto-refreshes if needed)
+	freshToken, wasRefreshed, err := oauth.RefreshToken(tokenSource, originalToken)
+	if err != nil {
+		return fmt.Errorf("refreshing token: %w", err)
+	}
+
+	// Save if refreshed, preserving original permissions
+	if wasRefreshed {
+		log.Printf("Token was refreshed, saving to file...")
+		if err := oauth.SaveTokenIfChanged(config.TokenFile, originalToken, freshToken); err != nil {
+			return fmt.Errorf("saving refreshed token: %w", err)
+		}
+		log.Printf("Refreshed token saved successfully")
+	}
+
+	return nil
 }
 
 // validateConfig validates the configuration and sets defaults
@@ -176,6 +238,80 @@ func validateConfig(config *Config) error {
 	return nil
 }
 
+// isRetryableError determines if an error is transient and should be retried
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := err.Error()
+
+	// IMAP-specific errors that are retryable
+	if strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "temporary failure") ||
+		strings.Contains(errStr, "i/o timeout") ||
+		strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "UNAVAILABLE") {
+		return true
+	}
+
+	// OAuth/authentication errors are generally not retryable
+	if strings.Contains(errStr, "authentication failed") ||
+		strings.Contains(errStr, "invalid credentials") {
+		return false
+	}
+
+	return false
+}
+
+// calculateBackoff calculates exponential backoff delay
+func calculateBackoff(attempt int, baseDelay int) time.Duration {
+	// Exponential backoff: baseDelay * 2^attempt
+	backoff := float64(baseDelay) * math.Pow(2, float64(attempt))
+	// Cap at 60 seconds
+	if backoff > 60 {
+		backoff = 60
+	}
+	return time.Duration(backoff) * time.Second
+}
+
+// retryOperation executes an operation with exponential backoff retry logic
+func retryOperation(config *Config, operation func() error, operationName string) error {
+	var lastErr error
+
+	for attempt := 0; attempt <= config.MaxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := calculateBackoff(attempt-1, config.RetryDelay)
+			log.Printf("Retry attempt %d/%d for %s after %v", attempt, config.MaxRetries, operationName, backoff)
+			time.Sleep(backoff)
+		}
+
+		err := operation()
+		if err == nil {
+			if attempt > 0 {
+				log.Printf("%s succeeded after %d retries", operationName, attempt)
+			}
+			return nil
+		}
+
+		lastErr = err
+
+		if !isRetryableError(err) {
+			log.Printf("%s failed with non-retryable error: %v", operationName, err)
+			return err
+		}
+
+		log.Printf("%s failed with retryable error (attempt %d/%d): %v",
+			operationName, attempt+1, config.MaxRetries+1, err)
+	}
+
+	log.Printf("%s failed after %d attempts", operationName, config.MaxRetries+1)
+	return fmt.Errorf("max retries exceeded: %w", lastErr)
+}
+
 // connectIMAP creates and authenticates an IMAP connection to Gmail
 func connectIMAP(config *Config) (*client.Client, error) {
 	log.Printf("Connecting to IMAP server: %s", config.IMAPServer)
@@ -186,10 +322,31 @@ func connectIMAP(config *Config) (*client.Client, error) {
 		return nil, err
 	}
 
-	// Connect to Gmail IMAP server with TLS
-	c, err := client.DialTLS(config.IMAPServer, nil)
+	// Connect to Gmail IMAP server with TLS and timeout
+	timeout := time.Duration(config.ConnectionTimeout) * time.Second
+	
+	// Create a dialer with timeout
+	dialer := &net.Dialer{
+		Timeout: timeout,
+	}
+	
+	// Dial with timeout
+	conn, err := dialer.Dial("tcp", config.IMAPServer)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to IMAP server: %w", err)
+	}
+
+	// Upgrade to TLS connection
+	c, err := client.New(conn)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("creating IMAP client: %w", err)
+	}
+
+	// Start TLS
+	if err := c.StartTLS(nil); err != nil {
+		c.Logout()
+		return nil, fmt.Errorf("starting TLS: %w", err)
 	}
 
 	log.Printf("Connected to IMAP server")
@@ -248,38 +405,50 @@ func (a *XOAuth2) Next(challenge []byte) (response []byte, err error) {
 func deliverMessage(config *Config, rawMessage []byte) error {
 	log.Printf("Preparing to deliver message via IMAP...")
 
-	// Connect and authenticate to IMAP
-	c, err := connectIMAP(config)
-	if err != nil {
-		return err
-	}
-	defer c.Logout()
+	var c *client.Client
+	var err error
 
-	// Parse the message to extract the date (optional, for INTERNALDATE)
-	// For simplicity, we'll use the current time
-	internalDate := time.Now()
-	log.Printf("Using internal date: %s", internalDate.Format(time.RFC3339))
+	// Wrap the entire delivery operation in retry logic
+	err = retryOperation(config, func() error {
+		// Connect and authenticate to IMAP
+		c, err = connectIMAP(config)
+		if err != nil {
+			return err
+		}
 
-	// APPEND the message to INBOX with \Seen flag unset (mark as unread)
-	// Gmail will apply filters and labels automatically
-	flags := []string{} // No flags = unread
-	mailbox := "INBOX"
+		// Parse the message to extract the date (optional, for INTERNALDATE)
+		// For simplicity, we'll use the current time
+		internalDate := time.Now()
+		log.Printf("Using internal date: %s", internalDate.Format(time.RFC3339))
 
-	log.Printf("Appending message to mailbox: %s", mailbox)
-	log.Printf("Message size: %d bytes", len(rawMessage))
-	log.Printf("Flags: %v (empty = unread)", flags)
+		// APPEND the message to INBOX with \Seen flag unset (mark as unread)
+		// Gmail will apply filters and labels automatically
+		flags := []string{} // No flags = unread
+		mailbox := "INBOX"
 
-	// Create a literal from the raw message
-	literal := &imapLiteral{data: rawMessage}
+		log.Printf("Appending message to mailbox: %s", mailbox)
+		log.Printf("Message size: %d bytes", len(rawMessage))
+		log.Printf("Flags: %v (empty = unread)", flags)
 
-	if err := c.Append(mailbox, flags, internalDate, literal); err != nil {
-		return fmt.Errorf("IMAP APPEND failed: %w", err)
-	}
+		// Create a literal from the raw message
+		literal := &imapLiteral{data: rawMessage}
 
-	log.Printf("Message successfully appended to %s", mailbox)
-	log.Printf("Gmail will apply filters and labels automatically")
+		appendErr := c.Append(mailbox, flags, internalDate, literal)
+		if appendErr != nil {
+			// Close connection on error before potential retry
+			c.Logout()
+			return fmt.Errorf("IMAP APPEND failed: %w", appendErr)
+		}
 
-	return nil
+		log.Printf("Message successfully appended to %s", mailbox)
+		log.Printf("Gmail will apply filters and labels automatically")
+
+		// Logout cleanly after successful delivery
+		c.Logout()
+		return nil
+	}, "IMAP message delivery")
+
+	return err
 }
 
 // imapLiteral implements the imap.Literal interface

@@ -17,6 +17,9 @@ This repository contains two transport programs:
 - Non-interactive operation using pre-authorized OAuth2 tokens
 - Configurable via JSON configuration file
 - Supports Insert API (bypass scanning) or Import API (standard delivery)
+- Automatic retry with exponential backoff for transient failures
+- Token validation before message read to prevent message loss
+- Concurrent-safe token refresh with file locking
 
 ### gmail-imap-transport
 - Reads RFC 822 email messages from stdin
@@ -25,6 +28,9 @@ This repository contains two transport programs:
 - Non-interactive operation using pre-authorized OAuth2 tokens
 - Configurable via JSON configuration file
 - Gmail automatically applies filters and labels
+- Automatic retry with exponential backoff for transient failures
+- Enforced connection timeout for reliability
+- Concurrent-safe token refresh with file locking
 
 ## Prerequisites
 
@@ -102,7 +108,9 @@ Edit `config.json` to match your setup:
   "use_insert": false,
   "api_timeout": 30,
   "operation_timeout": 120,
-  "filter_delay": 2
+  "filter_delay": 2,
+  "max_retries": 3,
+  "retry_delay": 1
 }
 ```
 
@@ -123,7 +131,9 @@ Edit `imap-config.json` to match your setup (note: user_id must be your full ema
   "user_id": "your-email@gmail.com",
   "verbose": false,
   "imap_server": "imap.gmail.com:993",
-  "connection_timeout": 30
+  "connection_timeout": 30,
+  "max_retries": 3,
+  "retry_delay": 1
 }
 ```
 
@@ -133,6 +143,8 @@ Edit `imap-config.json` to match your setup (note: user_id must be your full ema
 - `credentials_file`: Path to OAuth2 credentials from Google Cloud Console
 - `token_file`: Path to the token file created by `gmail-api-transport-get-token`
 - `verbose`: Enable verbose logging (can be overridden with `-v` flag)
+- `max_retries`: Maximum number of retry attempts for transient failures (default: 3)
+- `retry_delay`: Initial retry delay in seconds for exponential backoff (default: 1)
 
 **gmail-api-transport Specific:**
 - `user_id`: Gmail user ID ("me" for authenticated user, or specific email address)
@@ -145,10 +157,36 @@ Edit `imap-config.json` to match your setup (note: user_id must be your full ema
 **gmail-imap-transport Specific:**
 - `user_id`: Gmail email address (must be full email, not "me")
 - `imap_server`: IMAP server address (default: "imap.gmail.com:993")
-- `connection_timeout`: Connection timeout in seconds (default: 30
-- `credentials_file`: Path to OAuth2 credentials from Google Cloud Console
-- `token_file`: Path to the token file created by `gmail-api-transport-get-token`
-- `user_id`: Gmail user ID ("me" for authenticated user, or specific email address)
+- `connection_timeout`: Connection timeout in seconds (default: 30)
+
+## Reliability Features
+
+Both transport programs include robust reliability features designed for production use with mail transfer agents:
+
+### Automatic Retry with Exponential Backoff
+- Automatically retries transient failures (network errors, timeouts, rate limits, server errors)
+- Uses exponential backoff algorithm: 1s, 2s, 4s, 8s... (capped at 60 seconds)
+- Configurable retry attempts via `max_retries` (default: 3)
+- Configurable base delay via `retry_delay` (default: 1 second)
+- Smart error classification distinguishes retryable from permanent failures
+- All failures exit with code 1 for Exim compatibility
+
+### Token Validation and Refresh
+- OAuth2 token is validated and refreshed **before** reading message from stdin
+- Prevents message loss due to expired tokens
+- Token files maintain original file permissions when saved
+- Automatic token refresh is transparent to the user
+
+### Concurrent-Safe Operation
+- File locking prevents token corruption from concurrent invocations
+- Atomic write pattern (temp file + rename) prevents partial writes
+- Safe for high-volume mail processing with multiple simultaneous deliveries
+- Lock acquisition includes timeout to prevent indefinite blocking
+
+### Connection Management
+- IMAP transport enforces connection timeout at TCP level
+- Predictable timeout behavior prevents hanging on network issues
+- Connections are properly cleaned up on both success and failure
 
 ## Usage
 
@@ -241,13 +279,14 @@ Display Language: en
 =================================
 ```
 
-You can combine with verbose mode for more details:
-```bash:
+You can combine with verbose mode for more details.
+
+### Integration with Exim
 
 **Option 1: Using Gmail API transport**
 
-```
-# In /etc/exim4/exim4.conf.localmacros or similar
+```bash:
+# In /etc/exim/exim.conf or similar
 
 # Transport definition
 gmail-api-transport:
@@ -261,7 +300,7 @@ gmail-api-transport:
 **Option 2: Using IMAP transport**
 
 ```
-# In /etc/exim4/exim4.conf.localmacros or similar
+# In /etc/exim/exim.conf or similar
 
 # Transport definition
 gmail-imap-transport:
@@ -333,6 +372,10 @@ The token file will be automatically refreshed when needed, so ensure the progra
 
 4. **Token Refresh**: OAuth2 tokens are automatically refreshed. The token file will be updated, so ensure the process has write access.
 
+5. **Permission Preservation**: Token files maintain their original permissions when saved after refresh, respecting system administrator security policies.
+
+6. **Concurrent Access**: File locking ensures safe concurrent access to token files, preventing corruption when multiple processes run simultaneously.
+
 ## Troubleshooting
 
 ### "Failed to load config"
@@ -345,6 +388,7 @@ The token file will be automatically refreshed when needed, so ensure the progra
 - Check that Gmail API is enabled in Google Cloud Console
 - Ensure the OAuth2 scope includes `https://www.googleapis.com/auth/gmail.modify`
 - Check Gmail API quota limits
+- Review verbose logs to see if retries occurred
 
 ### gmail-imap-transport: "IMAP authentication failed"
 - Verify OAuth2 token is valid and not expired
@@ -360,6 +404,18 @@ The token file will be automatically refreshed when needed, so ensure the progra
 ### "No message received from stdin"
 - Verify data is being piped correctly
 - Check Exim logs for pipe transport errors
+
+### Transient Failures
+- The programs automatically retry transient failures (network errors, timeouts, rate limits)
+- Use verbose mode (`-v`) to see retry attempts and backoff delays
+- If messages consistently fail after retries, check network connectivity and Gmail API status
+- Increase `max_retries` if you experience frequent transient failures
+
+### Token File Issues
+- Token files are automatically refreshed when needed
+- File locking prevents corruption from concurrent access
+- If token refresh fails, check file permissions and disk space
+- Token validation occurs before reading messages to prevent message loss
 
 ## OAuth2 Scopes
 

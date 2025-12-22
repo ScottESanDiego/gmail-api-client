@@ -51,8 +51,8 @@ func main() {
 	// Get token using localhost web server callback
 	token := getTokenFromWeb(config)
 
-	// Save token using shared oauth package
-	if err := oauth.SaveToken(tokenFile, token); err != nil {
+	// Save token using shared oauth package with secure 0600 permissions
+	if err := oauth.SaveToken(tokenFile, token, 0600); err != nil {
 		log.Fatalf("Unable to save token: %v", err)
 	}
 

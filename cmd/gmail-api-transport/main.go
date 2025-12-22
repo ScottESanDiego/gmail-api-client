@@ -7,14 +7,17 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gmail-api-client/internal/oauth"
 
 	"golang.org/x/oauth2"
 	"google.golang.org/api/gmail/v1"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
 
@@ -38,6 +41,10 @@ type Config struct {
 	OperationTimeout int `json:"operation_timeout"`
 	// Filter processing delay in seconds (default: 2)
 	FilterDelay int `json:"filter_delay"`
+	// Maximum retry attempts for transient failures (default: 3)
+	MaxRetries int `json:"max_retries"`
+	// Initial retry delay in seconds (default: 1)
+	RetryDelay int `json:"retry_delay"`
 }
 
 var verbose bool
@@ -127,6 +134,15 @@ func main() {
 		return
 	}
 
+	// Pre-validate and refresh token before reading message from stdin
+	// This ensures we don't read and lose a message if auth fails
+	log.Printf("Validating OAuth2 token before reading message...")
+	if err := validateAndRefreshToken(config); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: Token validation failed: %v\n", err)
+		os.Exit(1)
+	}
+	log.Printf("Token validated successfully")
+
 	// Read email message from stdin
 	log.Printf("Reading message from stdin...")
 	message, err := io.ReadAll(os.Stdin)
@@ -186,6 +202,44 @@ func loadConfig(filename string) (*Config, error) {
 	return &config, nil
 }
 
+// validateAndRefreshToken validates the token and refreshes it if needed
+// This is called before reading message from stdin to avoid losing messages
+func validateAndRefreshToken(config *Config) error {
+	log.Printf("Loading and validating OAuth2 token...")
+
+	// Load original token to compare later
+	originalToken, err := oauth.LoadToken(config.TokenFile)
+	if err != nil {
+		return fmt.Errorf("loading token: %w", err)
+	}
+
+	// Load OAuth config
+	oauthConfig, err := oauth.LoadOAuthConfig(config.CredentialsFile)
+	if err != nil {
+		return fmt.Errorf("loading OAuth config: %w", err)
+	}
+
+	// Create token source
+	tokenSource := oauth.CreateTokenSource(oauthConfig, originalToken)
+
+	// Get fresh token (auto-refreshes if needed)
+	freshToken, wasRefreshed, err := oauth.RefreshToken(tokenSource, originalToken)
+	if err != nil {
+		return fmt.Errorf("refreshing token: %w", err)
+	}
+
+	// Save if refreshed, preserving original permissions
+	if wasRefreshed {
+		log.Printf("Token was refreshed, saving to file...")
+		if err := oauth.SaveTokenIfChanged(config.TokenFile, originalToken, freshToken); err != nil {
+			return fmt.Errorf("saving refreshed token: %w", err)
+		}
+		log.Printf("Refreshed token saved successfully")
+	}
+
+	return nil
+}
+
 // validateConfig validates the configuration and sets defaults
 func validateConfig(config *Config) error {
 	log.Printf("Validating configuration...")
@@ -218,6 +272,14 @@ func validateConfig(config *Config) error {
 	if config.FilterDelay <= 0 {
 		config.FilterDelay = 2
 		log.Printf("Using default filter delay: %d seconds", config.FilterDelay)
+	}
+	if config.MaxRetries <= 0 {
+		config.MaxRetries = 3
+		log.Printf("Using default max retries: %d", config.MaxRetries)
+	}
+	if config.RetryDelay <= 0 {
+		config.RetryDelay = 1
+		log.Printf("Using default retry delay: %d seconds", config.RetryDelay)
 	}
 
 	// Validate timeout values are reasonable
@@ -306,6 +368,93 @@ func testAPIConnection(config *Config) error {
 	return nil
 }
 
+// isRetryableError determines if an error is transient and should be retried
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for Google API errors
+	if apiErr, ok := err.(*googleapi.Error); ok {
+		// Retry on rate limit, server errors, and service unavailable
+		// 429 - Too Many Requests (rate limit)
+		// 500 - Internal Server Error
+		// 502 - Bad Gateway
+		// 503 - Service Unavailable
+		// 504 - Gateway Timeout
+		return apiErr.Code == 429 || apiErr.Code >= 500
+	}
+
+	// Check for context deadline exceeded (timeout)
+	errStr := err.Error()
+	if strings.Contains(errStr, "context deadline exceeded") {
+		return true
+	}
+
+	// Check for network errors
+	if strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "temporary failure") ||
+		strings.Contains(errStr, "i/o timeout") {
+		return true
+	}
+
+	// OAuth token refresh errors are not retryable at this level
+	// (they should be handled before message delivery)
+	if strings.Contains(errStr, "oauth2") || strings.Contains(errStr, "token") {
+		return false
+	}
+
+	return false
+}
+
+// calculateBackoff calculates exponential backoff delay
+func calculateBackoff(attempt int, baseDelay int) time.Duration {
+	// Exponential backoff: baseDelay * 2^attempt
+	// With jitter to avoid thundering herd
+	backoff := float64(baseDelay) * math.Pow(2, float64(attempt))
+	// Cap at 60 seconds
+	if backoff > 60 {
+		backoff = 60
+	}
+	return time.Duration(backoff) * time.Second
+}
+
+// retryOperation executes an operation with exponential backoff retry logic
+func retryOperation(config *Config, operation func() error, operationName string) error {
+	var lastErr error
+
+	for attempt := 0; attempt <= config.MaxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := calculateBackoff(attempt-1, config.RetryDelay)
+			log.Printf("Retry attempt %d/%d for %s after %v", attempt, config.MaxRetries, operationName, backoff)
+			time.Sleep(backoff)
+		}
+
+		err := operation()
+		if err == nil {
+			if attempt > 0 {
+				log.Printf("%s succeeded after %d retries", operationName, attempt)
+			}
+			return nil
+		}
+
+		lastErr = err
+
+		if !isRetryableError(err) {
+			log.Printf("%s failed with non-retryable error: %v", operationName, err)
+			return err
+		}
+
+		log.Printf("%s failed with retryable error (attempt %d/%d): %v",
+			operationName, attempt+1, config.MaxRetries+1, err)
+	}
+
+	log.Printf("%s failed after %d attempts", operationName, config.MaxRetries+1)
+	return fmt.Errorf("max retries exceeded: %w", lastErr)
+}
+
 // deliverMessage delivers an email message to Gmail using either Import or Insert API
 func deliverMessage(config *Config, rawMessage []byte) error {
 	log.Printf("Preparing to deliver message...")
@@ -342,36 +491,41 @@ func deliverMessage(config *Config, rawMessage []byte) error {
 
 	var result *gmail.Message
 
-	if config.UseInsert {
-		// Use Insert API - bypasses most scanning and classification (like IMAP APPEND)
-		log.Printf("Calling Gmail API users.messages.insert for user: %s", config.UserID)
-		log.Printf("Insert bypasses most scanning and classification")
+	// Wrap the API call in retry logic
+	err = retryOperation(config, func() error {
+		var apiErr error
 
-		call := service.Users.Messages.Insert(config.UserID, message).
-			InternalDateSource("dateHeader")
+		if config.UseInsert {
+			// Use Insert API - bypasses most scanning and classification (like IMAP APPEND)
+			log.Printf("Calling Gmail API users.messages.insert for user: %s", config.UserID)
+			log.Printf("Insert bypasses most scanning and classification")
 
-		result, err = call.Do()
-		if err != nil {
-			return fmt.Errorf("inserting message: %w", err)
+			call := service.Users.Messages.Insert(config.UserID, message).
+				InternalDateSource("dateHeader")
+
+			result, apiErr = call.Do()
+		} else {
+			// Use Import API - performs standard email delivery scanning and classification
+			log.Printf("Calling Gmail API users.messages.import for user: %s", config.UserID)
+			if config.NotSpam {
+				log.Printf("Setting neverMarkSpam=true to bypass Gmail spam classifier")
+			}
+
+			call := service.Users.Messages.Import(config.UserID, message).
+				InternalDateSource("dateHeader")
+
+			if config.NotSpam {
+				call = call.NeverMarkSpam(true)
+			}
+
+			result, apiErr = call.Do()
 		}
-	} else {
-		// Use Import API - performs standard email delivery scanning and classification
-		log.Printf("Calling Gmail API users.messages.import for user: %s", config.UserID)
-		if config.NotSpam {
-			log.Printf("Setting neverMarkSpam=true to bypass Gmail spam classifier")
-		}
 
-		call := service.Users.Messages.Import(config.UserID, message).
-			InternalDateSource("dateHeader")
+		return apiErr
+	}, "message delivery")
 
-		if config.NotSpam {
-			call = call.NeverMarkSpam(true)
-		}
-
-		result, err = call.Do()
-		if err != nil {
-			return fmt.Errorf("importing message: %w", err)
-		}
+	if err != nil {
+		return fmt.Errorf("delivering message: %w", err)
 	}
 
 	log.Printf("Message delivered successfully")
@@ -387,7 +541,13 @@ func deliverMessage(config *Config, rawMessage []byte) error {
 	time.Sleep(filterDelay)
 
 	// Re-fetch the message to get updated labels after filters have run
-	result, err = service.Users.Messages.Get(config.UserID, result.Id).Format("metadata").Do()
+	// Wrap in retry logic
+	err = retryOperation(config, func() error {
+		var fetchErr error
+		result, fetchErr = service.Users.Messages.Get(config.UserID, result.Id).Format("metadata").Do()
+		return fetchErr
+	}, "message re-fetch")
+
 	if err != nil {
 		// Non-fatal: continue even if re-fetch fails
 		log.Printf("WARNING: Failed to re-fetch message: %v", err)
@@ -400,7 +560,7 @@ func deliverMessage(config *Config, rawMessage []byte) error {
 	if err := applyLabels(service, config, result); err != nil {
 		// Log warning but don't fail the delivery
 		log.Printf("WARNING: Label modification had issues: %v", err)
-		fmt.Fprintf(os.Stderr, "WARNING: Message delivered but label modification failed: %v\\n", err)
+		fmt.Fprintf(os.Stderr, "WARNING: Message delivered but label modification failed: %v\n", err)
 	}
 
 	return nil
@@ -433,11 +593,15 @@ func applyLabels(service *gmail.Service, config *Config, result *gmail.Message) 
 
 	if !hasUserLabel && !hasInbox {
 		log.Printf("No user labels applied, adding INBOX label")
-		// Add INBOX and UNREAD labels to the message
-		modifyReq := &gmail.ModifyMessageRequest{
-			AddLabelIds: []string{"INBOX", "UNREAD"},
-		}
-		_, err := service.Users.Messages.Modify(config.UserID, result.Id, modifyReq).Do()
+		// Add INBOX and UNREAD labels to the message with retry logic
+		err := retryOperation(config, func() error {
+			modifyReq := &gmail.ModifyMessageRequest{
+				AddLabelIds: []string{"INBOX", "UNREAD"},
+			}
+			_, modifyErr := service.Users.Messages.Modify(config.UserID, result.Id, modifyReq).Do()
+			return modifyErr
+		}, "add INBOX and UNREAD labels")
+
 		if err != nil {
 			return fmt.Errorf("failed to add INBOX and UNREAD labels: %w", err)
 		}
@@ -454,10 +618,14 @@ func applyLabels(service *gmail.Service, config *Config, result *gmail.Message) 
 
 		if !hasUnread {
 			log.Printf("Adding UNREAD label")
-			modifyReq := &gmail.ModifyMessageRequest{
-				AddLabelIds: []string{"UNREAD"},
-			}
-			_, err := service.Users.Messages.Modify(config.UserID, result.Id, modifyReq).Do()
+			err := retryOperation(config, func() error {
+				modifyReq := &gmail.ModifyMessageRequest{
+					AddLabelIds: []string{"UNREAD"},
+				}
+				_, modifyErr := service.Users.Messages.Modify(config.UserID, result.Id, modifyReq).Do()
+				return modifyErr
+			}, "add UNREAD label")
+
 			if err != nil {
 				return fmt.Errorf("failed to add UNREAD label: %w", err)
 			}

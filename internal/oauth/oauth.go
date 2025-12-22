@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"syscall"
+	"time"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -27,19 +30,99 @@ func LoadToken(filename string) (*oauth2.Token, error) {
 	return &token, nil
 }
 
-// SaveToken writes an OAuth2 token to a file with 0600 permissions
-func SaveToken(filename string, token *oauth2.Token) error {
+// GetFilePermissions returns the file permissions (mode) of a file
+func GetFilePermissions(filename string) (os.FileMode, error) {
+	info, err := os.Stat(filename)
+	if err != nil {
+		return 0, fmt.Errorf("getting file permissions: %w", err)
+	}
+	return info.Mode().Perm(), nil
+}
+
+// acquireFileLock acquires an exclusive lock on a file descriptor
+// Returns an error if the lock cannot be acquired within a reasonable time
+func acquireFileLock(file *os.File) error {
+	// Try to acquire lock with timeout
+	maxAttempts := 50
+	for i := 0; i < maxAttempts; i++ {
+		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if err != syscall.EWOULDBLOCK {
+			return fmt.Errorf("acquiring file lock: %w", err)
+		}
+		// Lock is held by another process, wait and retry
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for file lock after %d attempts", maxAttempts)
+}
+
+// releaseFileLock releases the lock on a file descriptor
+func releaseFileLock(file *os.File) error {
+	return syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+}
+
+// SaveToken writes an OAuth2 token to a file with specified permissions
+// Uses atomic write (write to temp file, then rename) to prevent corruption
+// Uses file locking to prevent concurrent write conflicts
+func SaveToken(filename string, token *oauth2.Token, perm os.FileMode) error {
 	log.Printf("Saving token to: %s", filename)
 	data, err := json.MarshalIndent(token, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling token: %w", err)
 	}
 
-	if err := os.WriteFile(filename, data, 0600); err != nil {
-		return fmt.Errorf("writing token file: %w", err)
+	// Create temp file in same directory for atomic rename
+	dir := filepath.Dir(filename)
+	tempFile, err := os.CreateTemp(dir, ".token.*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temp file: %w", err)
+	}
+	tempName := tempFile.Name()
+	
+	// Ensure temp file is cleaned up on error
+	defer func() {
+		if tempFile != nil {
+			tempFile.Close()
+			os.Remove(tempName)
+		}
+	}()
+
+	// Acquire exclusive lock on temp file
+	if err := acquireFileLock(tempFile); err != nil {
+		return fmt.Errorf("locking temp file: %w", err)
 	}
 
-	log.Printf("Token saved successfully, expiry: %s", token.Expiry)
+	// Write data to temp file
+	if _, err := tempFile.Write(data); err != nil {
+		releaseFileLock(tempFile)
+		return fmt.Errorf("writing temp file: %w", err)
+	}
+
+	// Sync to ensure data is written to disk
+	if err := tempFile.Sync(); err != nil {
+		releaseFileLock(tempFile)
+		return fmt.Errorf("syncing temp file: %w", err)
+	}
+
+	// Set permissions on temp file
+	if err := tempFile.Chmod(perm); err != nil {
+		releaseFileLock(tempFile)
+		return fmt.Errorf("setting permissions: %w", err)
+	}
+
+	// Release lock and close file before rename
+	releaseFileLock(tempFile)
+	tempFile.Close()
+	tempFile = nil // Prevent defer from closing again
+
+	// Atomically rename temp file to target file
+	if err := os.Rename(tempName, filename); err != nil {
+		return fmt.Errorf("renaming temp file: %w", err)
+	}
+
+	log.Printf("Token saved successfully with permissions %v, expiry: %s", perm, token.Expiry)
 	return nil
 }
 
@@ -97,16 +180,26 @@ func TokenChanged(t1, t2 *oauth2.Token) bool {
 }
 
 // SaveTokenIfChanged saves a token only if it differs from the original
+// Preserves the original file permissions
 func SaveTokenIfChanged(filename string, originalToken, currentToken *oauth2.Token) error {
 	if !TokenChanged(originalToken, currentToken) {
 		log.Printf("Token unchanged, skipping save")
 		return nil
 	}
 	log.Printf("Token changed, saving to file...")
-	return SaveToken(filename, currentToken)
+	
+	// Get original file permissions
+	perm, err := GetFilePermissions(filename)
+	if err != nil {
+		log.Printf("WARNING: Could not get original permissions, using 0600: %v", err)
+		perm = 0600
+	}
+	
+	return SaveToken(filename, currentToken, perm)
 }
 
 // RefreshAndSaveToken is a convenience function that refreshes a token and saves it if changed
+// Preserves original token file permissions when saving
 func RefreshAndSaveToken(credentialsFile, tokenFile string) (*oauth2.Token, oauth2.TokenSource, error) {
 	// Load OAuth config
 	oauthConfig, err := LoadOAuthConfig(credentialsFile)
@@ -122,6 +215,13 @@ func RefreshAndSaveToken(credentialsFile, tokenFile string) (*oauth2.Token, oaut
 	}
 	log.Printf("Token loaded, expiry: %s", token.Expiry)
 
+	// Get original file permissions before any modifications
+	perm, err := GetFilePermissions(tokenFile)
+	if err != nil {
+		log.Printf("WARNING: Could not get original permissions, will use 0600: %v", err)
+		perm = 0600
+	}
+
 	// Create token source
 	tokenSource := CreateTokenSource(oauthConfig, token)
 
@@ -131,10 +231,10 @@ func RefreshAndSaveToken(credentialsFile, tokenFile string) (*oauth2.Token, oaut
 		return nil, nil, err
 	}
 
-	// Save if refreshed
+	// Save if refreshed, using original permissions
 	if wasRefreshed {
 		log.Printf("Saving refreshed token to file...")
-		if err := SaveToken(tokenFile, freshToken); err != nil {
+		if err := SaveToken(tokenFile, freshToken, perm); err != nil {
 			log.Printf("WARNING: Failed to save refreshed token: %v", err)
 		} else {
 			log.Printf("Refreshed token saved successfully")

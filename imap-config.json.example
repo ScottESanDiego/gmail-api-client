@@ -4,5 +4,7 @@
   "user_id": "your-email@gmail.com",
   "verbose": false,
   "imap_server": "imap.gmail.com:993",
-  "connection_timeout": 30
+  "connection_timeout": 30,
+  "max_retries": 3,
+  "retry_delay": 1
 }
