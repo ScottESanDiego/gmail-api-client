@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strings"
@@ -84,13 +85,26 @@ type LoggerInterface interface {
 
 // RetryOperation executes an operation with exponential backoff retry logic
 func RetryOperation(cfg *RetryConfig, logger LoggerInterface, operation func() error, operationName string) error {
+	return RetryOperationWithContext(context.Background(), cfg, logger, operation, operationName)
+}
+
+// RetryOperationWithContext executes an operation with retry logic and stops when context expires.
+func RetryOperationWithContext(ctx context.Context, cfg *RetryConfig, logger LoggerInterface, operation func() error, operationName string) error {
 	var lastErr error
 
 	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("%s canceled: %w", operationName, err)
+		}
+
 		if attempt > 0 {
 			backoff := CalculateBackoff(attempt-1, cfg.RetryDelay)
 			logger.Info("retrying operation", "operation", operationName, "attempt", attempt, "max_attempts", cfg.MaxRetries, "backoff", backoff)
-			time.Sleep(backoff)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return fmt.Errorf("%s canceled during retry backoff: %w", operationName, ctx.Err())
+			}
 		}
 
 		err := operation()

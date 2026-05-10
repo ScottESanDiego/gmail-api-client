@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -29,7 +30,9 @@ func LoadJSON(filename string, config interface{}) error {
 		return fmt.Errorf("reading config file: %w", err)
 	}
 
-	if err := json.Unmarshal(data, config); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(config); err != nil {
 		return fmt.Errorf("parsing config file: %w", err)
 	}
 

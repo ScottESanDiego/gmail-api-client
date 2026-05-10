@@ -165,38 +165,8 @@ func loadConfig(filename string) (*Config, error) {
 // This is called before reading message from stdin to avoid losing messages
 func validateAndRefreshToken(cfg *Config) error {
 	logger.Debug("loading and validating OAuth2 token")
-
-	// Load original token to compare later
-	originalToken, err := internal.LoadToken(cfg.TokenFile)
-	if err != nil {
-		return fmt.Errorf("loading token: %w", err)
-	}
-
-	// Load OAuth config
-	oauthConfig, err := internal.LoadOAuthConfig(cfg.CredentialsFile)
-	if err != nil {
-		return fmt.Errorf("loading OAuth config: %w", err)
-	}
-
-	// Create token source
-	tokenSource := internal.CreateTokenSource(oauthConfig, originalToken)
-
-	// Get fresh token (auto-refreshes if needed)
-	freshToken, wasRefreshed, err := internal.RefreshToken(tokenSource, originalToken)
-	if err != nil {
-		return fmt.Errorf("refreshing token: %w", err)
-	}
-
-	// Save if refreshed, preserving original permissions
-	if wasRefreshed {
-		logger.Debug("token was refreshed, saving to file")
-		if err := internal.SaveTokenIfChanged(cfg.TokenFile, originalToken, freshToken); err != nil {
-			return fmt.Errorf("saving refreshed token: %w", err)
-		}
-		logger.Debug("refreshed token saved successfully")
-	}
-
-	return nil
+	_, _, err := internal.RefreshAndSaveToken(cfg.CredentialsFile, cfg.TokenFile)
+	return err
 }
 
 // validateConfig validates the configuration and sets defaults
@@ -239,7 +209,7 @@ func getGmailService(cfg *Config) (*gmail.Service, oauth2.TokenSource, error) {
 	logger.Debug("creating Gmail API service")
 
 	// Use shared oauth package to handle token refresh
-	freshToken, tokenSource, err := internal.RefreshAndSaveToken(cfg.CredentialsFile, cfg.TokenFile)
+	_, tokenSource, err := internal.RefreshAndSaveToken(cfg.CredentialsFile, cfg.TokenFile)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -261,21 +231,12 @@ func getGmailService(cfg *Config) (*gmail.Service, oauth2.TokenSource, error) {
 	}
 	logger.Debug("Gmail API service created successfully")
 
-	// Update token reference in case it was refreshed
-	_ = freshToken
-
 	return service, tokenSource, nil
 }
 
 // testAPIConnection tests the Gmail API connection by calling getLanguage
 func testAPIConnection(cfg *Config) error {
 	logger.Debug("creating Gmail API service for testing")
-
-	// Load original token to compare later
-	originalToken, err := internal.LoadToken(cfg.TokenFile)
-	if err != nil {
-		return fmt.Errorf("loading token: %w", err)
-	}
 
 	service, tokenSource, err := getGmailService(cfg)
 	if err != nil {
@@ -285,14 +246,16 @@ func testAPIConnection(cfg *Config) error {
 	// Defer saving the token only if it changed
 	defer func() {
 		if token, err := tokenSource.Token(); err == nil {
-			if err := internal.SaveTokenIfChanged(cfg.TokenFile, originalToken, token); err != nil {
+			if err := internal.SaveTokenIfChanged(cfg.TokenFile, token); err != nil {
 				logger.Warn("failed to save token", "error", err)
 			}
 		}
 	}()
 
 	logger.Debug("calling Gmail API users.settings.getLanguage", "user_id", cfg.UserID)
-	langSettings, err := service.Users.Settings.GetLanguage(cfg.UserID).Do()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.APITimeout)*time.Second)
+	defer cancel()
+	langSettings, err := service.Users.Settings.GetLanguage(cfg.UserID).Context(ctx).Do()
 	if err != nil {
 		return fmt.Errorf("calling getLanguage: %w", err)
 	}
@@ -311,12 +274,6 @@ func testAPIConnection(cfg *Config) error {
 func deliverMessage(cfg *Config, rawMessage []byte) error {
 	logger.Debug("preparing to deliver message")
 
-	// Load original token to compare later
-	originalToken, err := internal.LoadToken(cfg.TokenFile)
-	if err != nil {
-		return fmt.Errorf("loading token: %w", err)
-	}
-
 	service, tokenSource, err := getGmailService(cfg)
 	if err != nil {
 		return fmt.Errorf("creating Gmail service: %w", err)
@@ -325,7 +282,7 @@ func deliverMessage(cfg *Config, rawMessage []byte) error {
 	// Defer saving the token only if it changed
 	defer func() {
 		if token, err := tokenSource.Token(); err == nil {
-			if err := internal.SaveTokenIfChanged(cfg.TokenFile, originalToken, token); err != nil {
+			if err := internal.SaveTokenIfChanged(cfg.TokenFile, token); err != nil {
 				logger.Warn("failed to save token", "error", err)
 			}
 		}
@@ -349,7 +306,10 @@ func deliverMessage(cfg *Config, rawMessage []byte) error {
 		RetryDelay: cfg.RetryDelay,
 	}
 
-	err = internal.RetryOperation(retryCfg, logger, func() error {
+	operationCtx, cancelOperation := context.WithTimeout(context.Background(), time.Duration(cfg.OperationTimeout)*time.Second)
+	defer cancelOperation()
+
+	err = internal.RetryOperationWithContext(operationCtx, retryCfg, logger, func() error {
 		logger.Debug("calling Gmail API users.messages.import", "user_id", cfg.UserID)
 		if cfg.NotSpam {
 			logger.Info("using Import API with neverMarkSpam=true")
@@ -357,15 +317,17 @@ func deliverMessage(cfg *Config, rawMessage []byte) error {
 			logger.Info("using Import API (standard delivery)")
 		}
 
-		call := service.Users.Messages.Import(cfg.UserID, message).
-			InternalDateSource("dateHeader")
+		call := service.Users.Messages.Import(cfg.UserID, message)
 
 		if cfg.NotSpam {
 			call = call.NeverMarkSpam(true)
 		}
 
+		ctx, cancel := context.WithTimeout(operationCtx, time.Duration(cfg.APITimeout)*time.Second)
+		defer cancel()
+
 		var apiErr error
-		result, apiErr = call.Do()
+		result, apiErr = call.Context(ctx).Do()
 		return apiErr
 	}, "message delivery")
 
@@ -383,13 +345,20 @@ func deliverMessage(cfg *Config, rawMessage []byte) error {
 	// Wait for Gmail filters to apply (labels may be applied asynchronously)
 	filterDelay := time.Duration(cfg.FilterDelay) * time.Second
 	logger.Debug("waiting for Gmail filters to process", "delay", filterDelay)
-	time.Sleep(filterDelay)
+	select {
+	case <-time.After(filterDelay):
+	case <-operationCtx.Done():
+		return fmt.Errorf("operation timed out while waiting for Gmail filters: %w", operationCtx.Err())
+	}
 
 	// Re-fetch the message to get updated labels after filters have run
 	// Wrap in retry logic
-	err = internal.RetryOperation(retryCfg, logger, func() error {
+	err = internal.RetryOperationWithContext(operationCtx, retryCfg, logger, func() error {
+		ctx, cancel := context.WithTimeout(operationCtx, time.Duration(cfg.APITimeout)*time.Second)
+		defer cancel()
+
 		var fetchErr error
-		result, fetchErr = service.Users.Messages.Get(cfg.UserID, result.Id).Format("metadata").Do()
+		result, fetchErr = service.Users.Messages.Get(cfg.UserID, result.Id).Format("metadata").Context(ctx).Do()
 		return fetchErr
 	}, "message re-fetch")
 
@@ -401,7 +370,7 @@ func deliverMessage(cfg *Config, rawMessage []byte) error {
 	}
 
 	// Attempt to apply labels - failures are non-fatal
-	if err := applyLabels(service, cfg, result); err != nil {
+	if err := applyLabels(operationCtx, service, cfg, result); err != nil {
 		// Log warning but don't fail the delivery
 		logger.Warn("label modification had issues", "error", err)
 		fmt.Fprintf(os.Stderr, "WARNING: Message delivered but label modification failed: %v\n", err)
@@ -411,7 +380,7 @@ func deliverMessage(cfg *Config, rawMessage []byte) error {
 }
 
 // applyLabels applies INBOX and UNREAD labels as needed
-func applyLabels(service *gmail.Service, cfg *Config, result *gmail.Message) error {
+func applyLabels(ctx context.Context, service *gmail.Service, cfg *Config, result *gmail.Message) error {
 	// Check if Gmail applied any user labels (from filters)
 	// If not, add INBOX label so message appears in inbox
 	hasUserLabel := false
@@ -443,11 +412,14 @@ func applyLabels(service *gmail.Service, cfg *Config, result *gmail.Message) err
 	if !hasUserLabel && !hasInbox {
 		logger.Debug("no user labels applied, adding INBOX label")
 		// Add INBOX and UNREAD labels to the message with retry logic
-		err := internal.RetryOperation(retryCfg, logger, func() error {
+		err := internal.RetryOperationWithContext(ctx, retryCfg, logger, func() error {
+			apiCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.APITimeout)*time.Second)
+			defer cancel()
+
 			modifyReq := &gmail.ModifyMessageRequest{
 				AddLabelIds: []string{"INBOX", "UNREAD"},
 			}
-			_, modifyErr := service.Users.Messages.Modify(cfg.UserID, result.Id, modifyReq).Do()
+			_, modifyErr := service.Users.Messages.Modify(cfg.UserID, result.Id, modifyReq).Context(apiCtx).Do()
 			return modifyErr
 		}, "add INBOX and UNREAD labels")
 
@@ -467,11 +439,14 @@ func applyLabels(service *gmail.Service, cfg *Config, result *gmail.Message) err
 
 		if !hasUnread {
 			logger.Debug("adding UNREAD label")
-			err := internal.RetryOperation(retryCfg, logger, func() error {
+			err := internal.RetryOperationWithContext(ctx, retryCfg, logger, func() error {
+				apiCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.APITimeout)*time.Second)
+				defer cancel()
+
 				modifyReq := &gmail.ModifyMessageRequest{
 					AddLabelIds: []string{"UNREAD"},
 				}
-				_, modifyErr := service.Users.Messages.Modify(cfg.UserID, result.Id, modifyReq).Do()
+				_, modifyErr := service.Users.Messages.Modify(cfg.UserID, result.Id, modifyReq).Context(apiCtx).Do()
 				return modifyErr
 			}, "add UNREAD label")
 

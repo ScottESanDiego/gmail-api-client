@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -63,11 +62,34 @@ func releaseFileLock(file *os.File) error {
 	return syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 }
 
-// SaveToken writes an OAuth2 token to a file with specified permissions
-// Uses atomic write (write to temp file, then rename) to prevent corruption
-// Uses file locking to prevent concurrent write conflicts
+func tokenLockFile(filename string) string {
+	return filename + ".lock"
+}
+
+func withTokenFileLock(filename string, fn func() error) error {
+	lockFile, err := os.OpenFile(tokenLockFile(filename), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return fmt.Errorf("opening token lock file: %w", err)
+	}
+	defer lockFile.Close()
+
+	if err := acquireFileLock(lockFile); err != nil {
+		return err
+	}
+	defer releaseFileLock(lockFile)
+
+	return fn()
+}
+
+// SaveToken writes an OAuth2 token to a file with specified permissions.
+// Uses atomic write (write to temp file, then rename) and a stable token lock.
 func SaveToken(filename string, token *oauth2.Token, perm os.FileMode) error {
-	log.Printf("Saving token to: %s", filename)
+	return withTokenFileLock(filename, func() error {
+		return saveTokenUnlocked(filename, token, perm)
+	})
+}
+
+func saveTokenUnlocked(filename string, token *oauth2.Token, perm os.FileMode) error {
 	data, err := json.MarshalIndent(token, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling token: %w", err)
@@ -89,31 +111,22 @@ func SaveToken(filename string, token *oauth2.Token, perm os.FileMode) error {
 		}
 	}()
 
-	// Acquire exclusive lock on temp file
-	if err := acquireFileLock(tempFile); err != nil {
-		return fmt.Errorf("locking temp file: %w", err)
-	}
-
 	// Write data to temp file
 	if _, err := tempFile.Write(data); err != nil {
-		releaseFileLock(tempFile)
 		return fmt.Errorf("writing temp file: %w", err)
 	}
 
 	// Sync to ensure data is written to disk
 	if err := tempFile.Sync(); err != nil {
-		releaseFileLock(tempFile)
 		return fmt.Errorf("syncing temp file: %w", err)
 	}
 
 	// Set permissions on temp file
 	if err := tempFile.Chmod(perm); err != nil {
-		releaseFileLock(tempFile)
 		return fmt.Errorf("setting permissions: %w", err)
 	}
 
-	// Release lock and close file before rename
-	releaseFileLock(tempFile)
+	// Close file before rename
 	tempFile.Close()
 	tempFile = nil // Prevent defer from closing again
 
@@ -122,26 +135,21 @@ func SaveToken(filename string, token *oauth2.Token, perm os.FileMode) error {
 		return fmt.Errorf("renaming temp file: %w", err)
 	}
 
-	log.Printf("Token saved successfully with permissions %v, expiry: %s", perm, token.Expiry)
 	return nil
 }
 
 // LoadOAuthConfig reads credentials file and creates an OAuth2 config
 func LoadOAuthConfig(credentialsFile string) (*oauth2.Config, error) {
-	log.Printf("Reading credentials from: %s", credentialsFile)
 	credentials, err := os.ReadFile(credentialsFile)
 	if err != nil {
 		return nil, fmt.Errorf("reading credentials file: %w", err)
 	}
-	log.Printf("Credentials loaded: %d bytes", len(credentials))
 
-	log.Printf("Parsing OAuth2 configuration...")
 	// Use gmail.modify scope, which supports message import and label modification.
 	oauthConfig, err := google.ConfigFromJSON(credentials, gmail.GmailModifyScope)
 	if err != nil {
 		return nil, fmt.Errorf("parsing credentials: %w", err)
 	}
-	log.Printf("OAuth2 config parsed successfully")
 
 	return oauthConfig, nil
 }
@@ -155,19 +163,12 @@ func CreateTokenSource(oauthConfig *oauth2.Config, token *oauth2.Token) oauth2.T
 // RefreshToken gets a fresh token from the token source, refreshing if needed
 // Returns the fresh token and whether it was refreshed
 func RefreshToken(tokenSource oauth2.TokenSource, originalToken *oauth2.Token) (*oauth2.Token, bool, error) {
-	log.Printf("Obtaining fresh token (will refresh if expired)...")
 	freshToken, err := tokenSource.Token()
 	if err != nil {
 		return nil, false, fmt.Errorf("getting fresh token: %w", err)
 	}
 
 	wasRefreshed := freshToken.AccessToken != originalToken.AccessToken
-	if wasRefreshed {
-		log.Printf("Token was refreshed")
-	} else {
-		log.Printf("Token is still valid")
-	}
-
 	return freshToken, wasRefreshed, nil
 }
 
@@ -179,23 +180,33 @@ func TokenChanged(t1, t2 *oauth2.Token) bool {
 	return t1.AccessToken != t2.AccessToken || !t1.Expiry.Equal(t2.Expiry)
 }
 
-// SaveTokenIfChanged saves a token only if it differs from the original
-// Preserves the original file permissions
-func SaveTokenIfChanged(filename string, originalToken, currentToken *oauth2.Token) error {
-	if !TokenChanged(originalToken, currentToken) {
-		log.Printf("Token unchanged, skipping save")
+// SaveTokenIfChanged saves a token only if it differs from the current token file.
+func SaveTokenIfChanged(filename string, currentToken *oauth2.Token) error {
+	if currentToken == nil {
 		return nil
 	}
-	log.Printf("Token changed, saving to file...")
 
-	// Get original file permissions
-	perm, err := GetFilePermissions(filename)
-	if err != nil {
-		log.Printf("WARNING: Could not get original permissions, using 0600: %v", err)
-		perm = 0600
-	}
+	return withTokenFileLock(filename, func() error {
+		fileToken, err := LoadToken(filename)
+		if err != nil {
+			return fmt.Errorf("loading token: %w", err)
+		}
+		if !TokenChanged(fileToken, currentToken) {
+			return nil
+		}
 
-	return SaveToken(filename, currentToken, perm)
+		tokenToSave := mergeRefreshToken(fileToken, currentToken)
+		if fileToken.Expiry.After(tokenToSave.Expiry) {
+			return nil
+		}
+
+		perm, err := GetFilePermissions(filename)
+		if err != nil {
+			perm = 0600
+		}
+
+		return saveTokenUnlocked(filename, tokenToSave, perm)
+	})
 }
 
 // RefreshAndSaveToken is a convenience function that refreshes a token and saves it if changed
@@ -207,39 +218,56 @@ func RefreshAndSaveToken(credentialsFile, tokenFile string) (*oauth2.Token, oaut
 		return nil, nil, err
 	}
 
-	// Load token from file
-	log.Printf("Loading OAuth2 token from: %s", tokenFile)
-	token, err := LoadToken(tokenFile)
-	if err != nil {
-		return nil, nil, fmt.Errorf("loading token: %w", err)
-	}
-	log.Printf("Token loaded, expiry: %s", token.Expiry)
+	var freshToken *oauth2.Token
+	var tokenSource oauth2.TokenSource
 
-	// Get original file permissions before any modifications
-	perm, err := GetFilePermissions(tokenFile)
-	if err != nil {
-		log.Printf("WARNING: Could not get original permissions, will use 0600: %v", err)
-		perm = 0600
-	}
+	err = withTokenFileLock(tokenFile, func() error {
+		// Load token from file
+		token, err := LoadToken(tokenFile)
+		if err != nil {
+			return fmt.Errorf("loading token: %w", err)
+		}
 
-	// Create token source
-	tokenSource := CreateTokenSource(oauthConfig, token)
+		// Get original file permissions before any modifications
+		perm, err := GetFilePermissions(tokenFile)
+		if err != nil {
+			perm = 0600
+		}
 
-	// Get fresh token (auto-refreshes if needed)
-	freshToken, wasRefreshed, err := RefreshToken(tokenSource, token)
+		// Create token source
+		tokenSource = CreateTokenSource(oauthConfig, token)
+
+		// Get fresh token (auto-refreshes if needed)
+		refreshedToken, wasRefreshed, err := RefreshToken(tokenSource, token)
+		if err != nil {
+			return err
+		}
+
+		freshToken = mergeRefreshToken(token, refreshedToken)
+
+		// Save if refreshed, using original permissions
+		if wasRefreshed {
+			if err := saveTokenUnlocked(tokenFile, freshToken, perm); err != nil {
+				return fmt.Errorf("saving refreshed token: %w", err)
+			}
+		}
+
+		return nil
+	})
 	if err != nil {
 		return nil, nil, err
 	}
 
-	// Save if refreshed, using original permissions
-	if wasRefreshed {
-		log.Printf("Saving refreshed token to file...")
-		if err := SaveToken(tokenFile, freshToken, perm); err != nil {
-			log.Printf("WARNING: Failed to save refreshed token: %v", err)
-		} else {
-			log.Printf("Refreshed token saved successfully")
-		}
-	}
-
 	return freshToken, tokenSource, nil
+}
+
+func mergeRefreshToken(fileToken, currentToken *oauth2.Token) *oauth2.Token {
+	if currentToken == nil {
+		return nil
+	}
+	merged := *currentToken
+	if merged.RefreshToken == "" && fileToken != nil {
+		merged.RefreshToken = fileToken.RefreshToken
+	}
+	return &merged
 }
