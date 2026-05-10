@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"flag"
 	"fmt"
 	"io"
+	"mime"
+	"net/mail"
 	"os"
 	"os/signal"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -31,6 +35,13 @@ type Config struct {
 	// Filter processing delay in seconds (default: 2)
 	FilterDelay int `json:"filter_delay"`
 }
+
+type MessageLogInfo struct {
+	From    string
+	Subject string
+}
+
+const maxLogSubjectRunes = 120
 
 var (
 	verbose       bool
@@ -118,13 +129,15 @@ func main() {
 
 	logger.Debug("message received", "bytes", len(message))
 
+	logInfo := extractMessageLogInfo(message)
+
 	// Deliver message to Gmail
 	if err := deliverMessage(ctx, cfg, message); err != nil {
 		logger.Fatal("message delivery failed", err)
 	}
 
 	// Success message for Exim - first line of stdout
-	logger.Success("Message delivered successfully to Gmail")
+	logger.Success(formatSuccessLogLine(logInfo))
 }
 
 func parseFlags(program string, args []string) error {
@@ -153,6 +166,59 @@ func printUsage(program string) {
 	fmt.Fprintf(os.Stderr, "  -v, --verbose    Enable verbose logging\n")
 	fmt.Fprintf(os.Stderr, "  --not-spam       Never mark this message as spam (only with import)\n")
 	fmt.Fprintf(os.Stderr, "  --test-api       Test API connection (shows Gmail language settings)\n")
+}
+
+func extractMessageLogInfo(rawMessage []byte) MessageLogInfo {
+	info := MessageLogInfo{
+		From:    "<unknown>",
+		Subject: "",
+	}
+
+	msg, err := mail.ReadMessage(bytes.NewReader(rawMessage))
+	if err != nil {
+		return info
+	}
+
+	if from := msg.Header.Get("From"); from != "" {
+		info.From = decodeHeaderValue(from)
+	}
+	if subject := msg.Header.Get("Subject"); subject != "" {
+		info.Subject = truncateRunes(decodeHeaderValue(subject), maxLogSubjectRunes)
+	}
+
+	return info
+}
+
+func decodeHeaderValue(value string) string {
+	decoded, err := (&mime.WordDecoder{}).DecodeHeader(value)
+	if err != nil {
+		return value
+	}
+	return decoded
+}
+
+func truncateRunes(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
+}
+
+func formatSuccessLogLine(info MessageLogInfo) string {
+	return fmt.Sprintf("Gmail import succeeded from=%q subject=%q",
+		sanitizeLogValue(info.From),
+		sanitizeLogValue(info.Subject))
+}
+
+func sanitizeLogValue(value string) string {
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, value)
+	return strings.Join(strings.Fields(value), " ")
 }
 
 // loadConfig reads and parses the configuration file
