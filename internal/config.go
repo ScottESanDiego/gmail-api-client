@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -34,6 +35,9 @@ func LoadJSON(filename string, config interface{}) error {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(config); err != nil {
 		return fmt.Errorf("parsing config file: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("parsing config file: multiple JSON values")
 	}
 
 	return nil

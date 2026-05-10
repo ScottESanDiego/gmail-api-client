@@ -21,10 +21,11 @@ This repository contains one transport program:
 
 ## Prerequisites
 
-1. **Google Cloud Project**: Create a project in [Google Cloud Console](https://console.cloud.google.com/)
-2. **Enable Gmail API**: Enable the Gmail API for your project
-3. **OAuth2 Credentials**: Create OAuth2 credentials (Desktop application type)
-4. **Download credentials**: Save the credentials JSON file
+1. **Go 1.26 or newer**: Install a current Go toolchain.
+2. **Google Cloud Project**: Create a project in [Google Cloud Console](https://console.cloud.google.com/)
+3. **Enable Gmail API**: Enable the Gmail API for your project
+4. **OAuth2 Credentials**: Create OAuth2 credentials (Desktop application type)
+5. **Download credentials**: Save the credentials JSON file
 
 ## Setup
 

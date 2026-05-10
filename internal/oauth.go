@@ -154,10 +154,9 @@ func LoadOAuthConfig(credentialsFile string) (*oauth2.Config, error) {
 	return oauthConfig, nil
 }
 
-// CreateTokenSource creates a token source that automatically refreshes tokens
-// Uses context.Background() to avoid timeout interference with token refresh
-func CreateTokenSource(oauthConfig *oauth2.Config, token *oauth2.Token) oauth2.TokenSource {
-	return oauthConfig.TokenSource(context.Background(), token)
+// CreateTokenSource creates a token source that automatically refreshes tokens.
+func CreateTokenSource(ctx context.Context, oauthConfig *oauth2.Config, token *oauth2.Token) oauth2.TokenSource {
+	return oauthConfig.TokenSource(ctx, token)
 }
 
 // RefreshToken gets a fresh token from the token source, refreshing if needed
@@ -211,7 +210,7 @@ func SaveTokenIfChanged(filename string, currentToken *oauth2.Token) error {
 
 // RefreshAndSaveToken is a convenience function that refreshes a token and saves it if changed
 // Preserves original token file permissions when saving
-func RefreshAndSaveToken(credentialsFile, tokenFile string) (*oauth2.Token, oauth2.TokenSource, error) {
+func RefreshAndSaveToken(ctx context.Context, credentialsFile, tokenFile string) (*oauth2.Token, oauth2.TokenSource, error) {
 	// Load OAuth config
 	oauthConfig, err := LoadOAuthConfig(credentialsFile)
 	if err != nil {
@@ -235,7 +234,7 @@ func RefreshAndSaveToken(credentialsFile, tokenFile string) (*oauth2.Token, oaut
 		}
 
 		// Create token source
-		tokenSource = CreateTokenSource(oauthConfig, token)
+		tokenSource = CreateTokenSource(ctx, oauthConfig, token)
 
 		// Get fresh token (auto-refreshes if needed)
 		refreshedToken, wasRefreshed, err := RefreshToken(tokenSource, token)

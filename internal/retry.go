@@ -2,8 +2,11 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net"
 	"strings"
 	"time"
 
@@ -17,7 +20,8 @@ func IsRetryableError(err error) bool {
 	}
 
 	// Check for Google API errors
-	if apiErr, ok := err.(*googleapi.Error); ok {
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) {
 		// Retry on rate limit, server errors, and service unavailable
 		// 429 - Too Many Requests (rate limit)
 		// 500 - Internal Server Error
@@ -28,20 +32,37 @@ func IsRetryableError(err error) bool {
 	}
 
 	// Check for context deadline exceeded (timeout)
-	errStr := err.Error()
-	if strings.Contains(errStr, "context deadline exceeded") {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	var temporary interface{ Temporary() bool }
+	if errors.As(err, &temporary) && temporary.Temporary() {
 		return true
 	}
 
 	// Check for network errors
+	errStr := strings.ToLower(err.Error())
 	if strings.Contains(errStr, "connection refused") ||
 		strings.Contains(errStr, "connection reset") ||
 		strings.Contains(errStr, "timeout") ||
 		strings.Contains(errStr, "temporary failure") ||
 		strings.Contains(errStr, "i/o timeout") ||
-		strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "eof") ||
 		strings.Contains(errStr, "broken pipe") ||
-		strings.Contains(errStr, "UNAVAILABLE") {
+		strings.Contains(errStr, "unavailable") {
 		return true
 	}
 

@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
+	"time"
 
 	"gmail-api-client/internal"
 
@@ -63,16 +66,34 @@ func main() {
 // getTokenFromWeb requests a token from the web using a local callback server
 func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
 	// Generate auth URL with offline access and force approval prompt
-	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
+	state, err := randomState()
+	if err != nil {
+		log.Fatalf("Unable to generate OAuth state: %v", err)
+	}
+	authURL := config.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.ApprovalForce)
 
 	// Channels to receive the authorization code or error
-	codeChan := make(chan string)
-	errChan := make(chan error)
+	codeChan := make(chan string, 1)
+	errChan := make(chan error, 1)
 
 	// Start local HTTP server to receive the callback
-	server := &http.Server{Addr: ":8080"}
+	mux := http.NewServeMux()
+	server := &http.Server{
+		Addr:              "127.0.0.1:8080",
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
 
-	http.HandleFunc("/oauth2callback", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/oauth2callback", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("state") != state {
+			errChan <- fmt.Errorf("invalid OAuth state")
+			http.Error(w, "Invalid OAuth state", http.StatusBadRequest)
+			return
+		}
+
 		code := r.URL.Query().Get("code")
 		if code == "" {
 			errChan <- fmt.Errorf("no authorization code received")
@@ -130,6 +151,14 @@ func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
 	fmt.Println("✓ Token obtained successfully!")
 
 	return token
+}
+
+func randomState() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b[:]), nil
 }
 
 // openBrowser attempts to open the default browser to the specified URL
