@@ -1,35 +1,22 @@
-# Gmail API/IMAP Transport
+# Gmail API Transport
 
-Non-interactive Go programs that read email messages from stdin and deliver them to Gmail. Designed for integration with mail transfer agents like Exim.
+Non-interactive Go program that reads email messages from stdin and delivers them to Gmail. Designed for integration with mail transfer agents like Exim.
 
-## Programs
+## Program
 
-This repository contains two transport programs:
+This repository contains one transport program:
 
 1. **gmail-api-transport** - Uses the Gmail API for delivery
-2. **gmail-imap-transport** - Uses IMAP APPEND for delivery
 
 ## Features
 
-### gmail-api-transport
 - Reads RFC 822 email messages from stdin
 - Uses Gmail API's `users.messages.import` to preserve original headers
 - Non-interactive operation using pre-authorized OAuth2 tokens
 - Configurable via JSON configuration file
-- Supports Insert API (bypass scanning) or Import API (standard delivery)
+- Uses Gmail's Import API for standard delivery scanning and classification
 - Automatic retry with exponential backoff for transient failures
 - Token validation before message read to prevent message loss
-- Concurrent-safe token refresh with file locking
-
-### gmail-imap-transport
-- Reads RFC 822 email messages from stdin
-- Uses IMAP APPEND command to deliver messages
-- OAuth2 authentication via XOAUTH2 SASL mechanism
-- Non-interactive operation using pre-authorized OAuth2 tokens
-- Configurable via JSON configuration file
-- Gmail automatically applies filters and labels
-- Automatic retry with exponential backoff for transient failures
-- Enforced connection timeout for reliability
 - Concurrent-safe token refresh with file locking
 
 ## Prerequisites
@@ -47,14 +34,11 @@ This repository contains two transport programs:
 go mod download
 ```
 
-### 2. Build the Programs
+### 2. Build the Program
 
 ```bash
 # Build the Gmail API transport
 go build -o gmail-api-transport cmd/gmail-api-transport/main.go
-
-# Build the Gmail IMAP transport
-go build -o gmail-imap-transport cmd/gmail-imap-transport/main.go
 
 # Build the token helper (for initial setup only)
 go build -o gmail-api-transport-get-token cmd/gmail-api-transport-get-token/main.go
@@ -88,8 +72,6 @@ If the browser doesn't open automatically, copy the URL shown in the terminal an
 
 ### 4. Create Configuration File
 
-**For gmail-api-transport:**
-
 Copy the example configuration:
 
 ```bash
@@ -105,7 +87,6 @@ Edit `config.json` to match your setup:
   "user_id": "me",
   "verbose": false,
   "not_spam": false,
-  "use_insert": false,
   "api_timeout": 30,
   "operation_timeout": 120,
   "filter_delay": 2,
@@ -114,54 +95,22 @@ Edit `config.json` to match your setup:
 }
 ```
 
-**For gmail-imap-transport:**
-
-Copy the IMAP example configuration:
-
-```bash
-cp imap-config.json.example imap-config.json
-```
-
-Edit `imap-config.json` to match your setup (note: user_id must be your full email address):
-
-```json
-{
-  "credentials_file": "credentials/credentials.json",
-  "token_file": "credentials/token.json",
-  "user_id": "your-email@gmail.com",
-  "verbose": false,
-  "imap_server": "imap.gmail.com:993",
-  "connection_timeout": 30,
-  "max_retries": 3,
-  "retry_delay": 1
-}
-```
-
 ## Configuration Options
 
-**Common Configuration Options:**
 - `credentials_file`: Path to OAuth2 credentials from Google Cloud Console
 - `token_file`: Path to the token file created by `gmail-api-transport-get-token`
 - `verbose`: Enable verbose logging (can be overridden with `-v` flag)
 - `max_retries`: Maximum number of retry attempts for transient failures (default: 3)
 - `retry_delay`: Initial retry delay in seconds for exponential backoff (default: 1)
-
-**gmail-api-transport Specific:**
 - `user_id`: Gmail user ID ("me" for authenticated user, or specific email address)
 - `not_spam`: Never mark messages as spam - only applies to Import API (can be overridden with `--not-spam` flag)
-- `use_insert`: Use Insert API instead of Import API to bypass scanning (can be overridden with `--use-insert` flag)
 - `api_timeout`: Timeout for individual Gmail API calls in seconds (default: 30)
 - `operation_timeout`: Overall timeout for the entire operation in seconds (default: 120)
 - `filter_delay`: Delay in seconds to wait for Gmail filters to process after message delivery (default: 2)
 
-**gmail-imap-transport Specific:**
-- `user_id`: Gmail email address (must be full email, not "me")
-- `imap_server`: IMAP server address (default: "imap.gmail.com:993")
-- `connection_timeout`: Connection timeout in seconds (default: 30)
-
 ## Reliability Features
 
-Both transport programs include robust reliability features designed for production use with mail transfer agents:
+The transport program includes robust reliability features designed for production use with mail transfer agents:
 
 ### Automatic Retry with Exponential Backoff
 - Automatically retries transient failures (network errors, timeouts, rate limits, server errors)
@@ -190,11 +139,6 @@ Both transport programs include robust reliability features designed for product
 - Safe for high-volume mail processing with multiple simultaneous deliveries
 - Lock acquisition includes timeout to prevent indefinite blocking
 
-### Connection Management
-- IMAP transport enforces connection timeout at TCP level
-- Predictable timeout behavior prevents hanging on network issues
-- Connections are properly cleaned up on both success and failure
-
 ### Modular Architecture
 - Shared retry logic in `internal/retry.go` for consistency
 - Structured logging in `internal/logging.go`
@@ -207,16 +151,8 @@ Both transport programs include robust reliability features designed for product
 
 ### Basic Usage
 
-**Using Gmail API transport:**
-
 ```bash
 cat message.eml | ./gmail-api-transport config.json
-```
-
-**Using IMAP transport:**
-
-```bash
-cat message.eml | ./gmail-imap-transport config.json
 ```
 
 ### Verbose Mode
@@ -254,25 +190,10 @@ cat message.eml | ./gmail-api-transport config.json --not-spam
 
 This sets the `neverMarkSpam` parameter in the Gmail API, which tells Gmail to bypass the spam classifier for this message. This is useful for automated mail delivery systems where you trust the source.
 
-### Use Insert API Instead of Import
-
-By default, the program uses the Gmail `import` API which performs standard email delivery scanning and classification similar to SMTP. To bypass most scanning and classification (similar to IMAP APPEND), use the `insert` API:
-
-```bash
-cat message.eml | ./gmail-api-transport config.json --use-insert
-```
-
-**Key differences:**
-- **Import API** (default): Performs standard email delivery scanning and classification, similar to receiving via SMTP
-- **Insert API**: Directly inserts messages bypassing most scanning and classification, similar to IMAP APPEND
-
-Note: The `--not-spam` flag only works with the Import API (default). When using `--use-insert`, the Insert API already bypasses spam filtering.
-
 You can combine flags:
 
 ```bash
 cat message.eml | ./gmail-api-transport config.json --verbose --not-spam
-cat message.eml | ./gmail-api-transport config.json --verbose --use-insert
 ```
 
 ### Test API Connection
@@ -302,9 +223,7 @@ You can combine with verbose mode for more details.
 
 ### Integration with Exim
 
-**Option 1: Using Gmail API transport**
-
-```bash:
+```bash
 # In /etc/exim/exim.conf or similar
 
 # Transport definition
@@ -316,30 +235,10 @@ gmail-api-transport:
   temp_errors = *
 ```
 
-**Option 2: Using IMAP transport**
-
-```
-# In /etc/exim/exim.conf or similar
-
-# Transport definition
-gmail-imap-transport:
-  driver = pipe
-  command = /path/to/gmail-imap-transport /path/to/config.json
-  user = mail
-  return_fail_output = true
-  temp_errors = *
-```
-
-Then configure a router to use one of these transports:
+Then configure a router to use this transport:
 
 ```
 gmail-router:
-  driver = accept
-  domains = your-domain.com
-  local_parts = specific-user
-  transport = gmail-api-transport  # or gmail-imap
-```
-gmail-api-router:
   driver = accept
   domains = your-domain.com
   local_parts = specific-user
@@ -399,36 +298,15 @@ The token file will be automatically refreshed when needed, so ensure the progra
 ## OAuth2 Scopes
 
 **gmail-api-transport** requires:
-- `https://www.googleapis.com/auth/gmail.modify` - Read, compose, and send emails (includes insert and settings.basic)
-
-**gmail-imap-transport** requires:
-- `https://mail.google.com/` - Full mail access via IMAP/SMTP/POP
-
-Note: Both programs use the same OAuth2 token generated by `gmail-api-transport-get-token`, which uses the `gmail.modify` scope.
+- `https://www.googleapis.com/auth/gmail.modify` - Read, compose, and send emails
 
 **Use gmail-api-transport when:**
-- You want more control over delivery (Import vs Insert API)
+- You want Gmail Import API delivery with standard scanning and classification
 - You need to bypass spam filtering (`--not-spam` flag)
-- You prefer REST API over IMAP protocol
 - You want to use Gmail's filters
-
-**Use gmail-imap-transport when:**
-- You prefer standard IMAP protocol
-- You want simpler implementation (less complex than API)
-- Your OAuth2 scope is `https://mail.google.com/` 
-- You want to skip Gmail's scanning/classification 
-
-**Key Differences:**
-- **API Transport**: Uses Gmail REST API, more options for delivery control
-- **IMAP Transport**: Uses standard IMAP APPEND, simpler but less control
-- Both support OAuth2 authentication
-- Both preserve message headers and content
-- Only API versions allows Gmail filters to run automatically (unless using Insert API with API transport)
 
 ## References
 
 - [Gmail API Documentation](https://developers.google.com/gmail/api)
 - [Gmail API - Import Messages](https://developers.google.com/gmail/api/reference/rest/v1/users.messages/import)
-- [Gmail IMAP Extensions](https://developers.google.com/workspace/gmail/imap/imap-extensions)
-- [OAuth2 for IMAP (XOAUTH2)](https://developers.google.com/workspace/gmail/imap/xoauth2-protocol)
 - [Exim Pipe Transport](https://www.exim.org/exim-html-current/doc/html/spec_html/ch-the_pipe_transport.html)

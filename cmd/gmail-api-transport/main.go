@@ -20,8 +20,6 @@ type Config struct {
 	internal.Common
 	// Never mark as spam (ignore Gmail spam classifier)
 	NotSpam bool `json:"not_spam"`
-	// Use Insert instead of Import (bypasses scanning, similar to IMAP APPEND)
-	UseInsert bool `json:"use_insert"`
 	// API call timeout in seconds (default: 30)
 	APITimeout int `json:"api_timeout"`
 	// Overall operation timeout in seconds (default: 120)
@@ -33,19 +31,17 @@ type Config struct {
 var (
 	verbose       bool
 	neverMarkSpam bool
-	useInsert     bool
 	testAPI       bool
 	logger        *internal.Logger
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <config-file> [-v|--verbose] [--not-spam] [--use-insert] [--test-api]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s <config-file> [-v|--verbose] [--not-spam] [--test-api]\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "\nReads email message from stdin and imports it to Gmail using the API.\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		fmt.Fprintf(os.Stderr, "  -v, --verbose    Enable verbose logging\n")
 		fmt.Fprintf(os.Stderr, "  --not-spam       Never mark this message as spam (only with import)\n")
-		fmt.Fprintf(os.Stderr, "  --use-insert     Use Insert API instead of Import (bypasses scanning)\n")
 		fmt.Fprintf(os.Stderr, "  --test-api       Test API connection (shows Gmail language settings)\n")
 		os.Exit(1)
 	}
@@ -59,10 +55,11 @@ func main() {
 			verbose = true
 		case "--not-spam":
 			neverMarkSpam = true
-		case "--use-insert":
-			useInsert = true
 		case "--test-api":
 			testAPI = true
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown option: %s\n", arg)
+			os.Exit(1)
 		}
 	}
 
@@ -95,15 +92,9 @@ func main() {
 		cfg.NotSpam = true
 	}
 
-	// Override use-insert setting if command line flag is set
-	if useInsert {
-		cfg.UseInsert = true
-	}
-
 	logger.Debug("configuration loaded successfully",
 		"user_id", cfg.UserID,
-		"not_spam", cfg.NotSpam,
-		"use_insert", cfg.UseInsert)
+		"not_spam", cfg.NotSpam)
 
 	// If test-api mode, just test the API connection and exit
 	if testAPI {
@@ -316,7 +307,7 @@ func testAPIConnection(cfg *Config) error {
 	return nil
 }
 
-// deliverMessage delivers an email message to Gmail using either Import or Insert API
+// deliverMessage delivers an email message to Gmail using the Import API
 func deliverMessage(cfg *Config, rawMessage []byte) error {
 	logger.Debug("preparing to deliver message")
 
@@ -359,36 +350,22 @@ func deliverMessage(cfg *Config, rawMessage []byte) error {
 	}
 
 	err = internal.RetryOperation(retryCfg, logger, func() error {
-		var apiErr error
-
-		if cfg.UseInsert {
-			// Use Insert API - bypasses most scanning and classification (like IMAP APPEND)
-			logger.Debug("calling Gmail API users.messages.insert", "user_id", cfg.UserID)
-			logger.Info("using Insert API (bypasses scanning)")
-
-			call := service.Users.Messages.Insert(cfg.UserID, message).
-				InternalDateSource("dateHeader")
-
-			result, apiErr = call.Do()
+		logger.Debug("calling Gmail API users.messages.import", "user_id", cfg.UserID)
+		if cfg.NotSpam {
+			logger.Info("using Import API with neverMarkSpam=true")
 		} else {
-			// Use Import API - performs standard email delivery scanning and classification
-			logger.Debug("calling Gmail API users.messages.import", "user_id", cfg.UserID)
-			if cfg.NotSpam {
-				logger.Info("using Import API with neverMarkSpam=true")
-			} else {
-				logger.Info("using Import API (standard delivery)")
-			}
-
-			call := service.Users.Messages.Import(cfg.UserID, message).
-				InternalDateSource("dateHeader")
-
-			if cfg.NotSpam {
-				call = call.NeverMarkSpam(true)
-			}
-
-			result, apiErr = call.Do()
+			logger.Info("using Import API (standard delivery)")
 		}
 
+		call := service.Users.Messages.Import(cfg.UserID, message).
+			InternalDateSource("dateHeader")
+
+		if cfg.NotSpam {
+			call = call.NeverMarkSpam(true)
+		}
+
+		var apiErr error
+		result, apiErr = call.Do()
 		return apiErr
 	}, "message delivery")
 

@@ -136,7 +136,7 @@ func LoadOAuthConfig(credentialsFile string) (*oauth2.Config, error) {
 	log.Printf("Credentials loaded: %d bytes", len(credentials))
 
 	log.Printf("Parsing OAuth2 configuration...")
-	// Use gmail.modify scope which includes insert and settings.basic permissions
+	// Use gmail.modify scope, which supports message import and label modification.
 	oauthConfig, err := google.ConfigFromJSON(credentials, gmail.GmailModifyScope)
 	if err != nil {
 		return nil, fmt.Errorf("parsing credentials: %w", err)

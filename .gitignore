@@ -1,7 +1,6 @@
 # Ignore Go build artifacts in root directory only
 /gmail-api-transport
 /gmail-api-transport-get-token
-/gmail-imap-transport
 *.exe
 *.exe~
 *.dll

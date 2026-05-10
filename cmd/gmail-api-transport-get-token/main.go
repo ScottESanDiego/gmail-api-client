@@ -39,7 +39,7 @@ func main() {
 	}
 
 	// Parse OAuth2 config with required scopes
-	// gmail.modify includes both insert and settings.basic permissions
+	// gmail.modify supports message import and label modification.
 	config, err := google.ConfigFromJSON(credentials, gmail.GmailModifyScope)
 	if err != nil {
 		log.Fatalf("Unable to parse credentials: %v", err)
