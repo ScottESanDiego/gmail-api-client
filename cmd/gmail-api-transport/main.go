@@ -28,6 +28,8 @@ type Config struct {
 	internal.Common
 	// Never mark as spam (ignore Gmail spam classifier)
 	NotSpam bool `json:"not_spam"`
+	// Include sanitized sender and subject in the Exim-visible success log line.
+	LogMessageDetails *bool `json:"log_message_details"`
 	// API call timeout in seconds (default: 30)
 	APITimeout int `json:"api_timeout"`
 	// Overall operation timeout in seconds (default: 120)
@@ -41,7 +43,10 @@ type MessageLogInfo struct {
 	Subject string
 }
 
-const maxLogSubjectRunes = 120
+const (
+	maxLogFromRunes    = 160
+	maxLogSubjectRunes = 120
+)
 
 var (
 	verbose       bool
@@ -97,7 +102,8 @@ func main() {
 
 	logger.Debug("configuration loaded successfully",
 		"user_id", cfg.UserID,
-		"not_spam", cfg.NotSpam)
+		"not_spam", cfg.NotSpam,
+		"log_message_details", cfg.shouldLogMessageDetails())
 
 	// If test-api mode, just test the API connection and exit
 	if testAPI {
@@ -129,7 +135,10 @@ func main() {
 
 	logger.Debug("message received", "bytes", len(message))
 
-	logInfo := extractMessageLogInfo(message)
+	var logInfo MessageLogInfo
+	if cfg.shouldLogMessageDetails() {
+		logInfo = extractMessageLogInfo(message)
+	}
 
 	// Deliver message to Gmail
 	if err := deliverMessage(ctx, cfg, message); err != nil {
@@ -137,7 +146,7 @@ func main() {
 	}
 
 	// Success message for Exim - first line of stdout
-	logger.Success(formatSuccessLogLine(logInfo))
+	logger.Success(formatSuccessLogLine(cfg.shouldLogMessageDetails(), logInfo))
 }
 
 func parseFlags(program string, args []string) error {
@@ -168,6 +177,10 @@ func printUsage(program string) {
 	fmt.Fprintf(os.Stderr, "  --test-api       Test API connection (shows Gmail language settings)\n")
 }
 
+func (cfg *Config) shouldLogMessageDetails() bool {
+	return cfg.LogMessageDetails == nil || *cfg.LogMessageDetails
+}
+
 func extractMessageLogInfo(rawMessage []byte) MessageLogInfo {
 	info := MessageLogInfo{
 		From:    "<unknown>",
@@ -180,13 +193,19 @@ func extractMessageLogInfo(rawMessage []byte) MessageLogInfo {
 	}
 
 	if from := msg.Header.Get("From"); from != "" {
-		info.From = decodeHeaderValue(from)
+		if decodedFrom := prepareLogHeaderValue(from, maxLogFromRunes); decodedFrom != "" {
+			info.From = decodedFrom
+		}
 	}
 	if subject := msg.Header.Get("Subject"); subject != "" {
-		info.Subject = truncateRunes(decodeHeaderValue(subject), maxLogSubjectRunes)
+		info.Subject = prepareLogHeaderValue(subject, maxLogSubjectRunes)
 	}
 
 	return info
+}
+
+func prepareLogHeaderValue(value string, limit int) string {
+	return truncateRunes(sanitizeLogValue(decodeHeaderValue(value)), limit)
 }
 
 func decodeHeaderValue(value string) string {
@@ -205,7 +224,11 @@ func truncateRunes(value string, limit int) string {
 	return string(runes[:limit])
 }
 
-func formatSuccessLogLine(info MessageLogInfo) string {
+func formatSuccessLogLine(includeDetails bool, info MessageLogInfo) string {
+	if !includeDetails {
+		return "Gmail import succeeded"
+	}
+
 	return fmt.Sprintf("Gmail import succeeded from=%q subject=%q",
 		sanitizeLogValue(info.From),
 		sanitizeLogValue(info.Subject))

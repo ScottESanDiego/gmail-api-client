@@ -88,6 +88,7 @@ Edit `config.json` to match your setup:
   "user_id": "me",
   "verbose": false,
   "not_spam": false,
+  "log_message_details": true,
   "api_timeout": 30,
   "operation_timeout": 120,
   "filter_delay": 2,
@@ -105,6 +106,7 @@ Edit `config.json` to match your setup:
 - `retry_delay`: Initial retry delay in seconds for exponential backoff (default: 1)
 - `user_id`: Gmail user ID ("me" for authenticated user, or specific email address)
 - `not_spam`: Never mark messages as spam - only applies to Import API (can be overridden with `--not-spam` flag)
+- `log_message_details`: Include sanitized sender and subject details in the Exim-visible success log line (default: true when omitted)
 - `api_timeout`: Timeout for individual Gmail API calls in seconds (default: 30)
 - `operation_timeout`: Overall timeout for the entire operation in seconds (default: 120)
 - `filter_delay`: Delay in seconds to wait for Gmail filters to process after message delivery (default: 2)
@@ -127,6 +129,20 @@ The transport program includes robust reliability features designed for producti
 - Non-verbose mode minimizes output for production use
 - **First line of output is always useful for Exim logging** (success/failure state)
 - Error messages to stderr are clear and actionable
+
+When `log_message_details` is true, the success line written to stdout includes the message sender and the first portion of the subject:
+
+```text
+Gmail import succeeded from="sender@example.com" subject="Quarterly invoice"
+```
+
+When `log_message_details` is false, the success line omits message-specific header values:
+
+```text
+Gmail import succeeded
+```
+
+The detailed log values come from the message `From` and `Subject` headers. They are MIME-decoded, control characters are converted to spaces, whitespace is collapsed, and values are quoted before logging. The sender is truncated to 160 runes and the subject is truncated to 120 runes.
 
 ### Token Validation and Refresh
 - OAuth2 token is validated and refreshed **before** reading message from stdin
@@ -179,7 +195,7 @@ Verbose output includes:
 - Retry attempts and backoff delays
 - Structured key-value pairs for all operations
 
-In non-verbose mode, only critical errors and the final success/failure message are shown. The **first line of output** is always a clear success or failure message, which is ideal for Exim's log format (Exim only logs the first line of stdout).
+In non-verbose mode, only critical errors and the final success/failure message are shown. The **first line of output** is always a clear success or failure message, which is ideal for Exim's log format (Exim only logs the first line of stdout). Set `log_message_details` to `false` if Exim logs should not contain message sender or subject values.
 
 ### Bypass Spam Filter
 
@@ -275,6 +291,14 @@ The token file will be automatically refreshed when needed, so ensure the progra
 - Use `"me"` for the authenticated user's mailbox
 - Use a specific email address if your OAuth2 setup has domain-wide delegation
 
+### log_message_details
+Controls whether the Exim-visible success log line includes message-specific header values.
+
+- `true`: log `from="..." subject="..."` after sanitizing and truncating those values
+- `false`: log only `Gmail import succeeded`
+
+This setting affects the success line written to stdout. Verbose/debug logging may still include operational details intended for troubleshooting.
+
 ## Security Considerations
 
 1. **Protect Token File**: The `token.json` file grants access to your Gmail account. Set appropriate permissions:
@@ -289,11 +313,13 @@ The token file will be automatically refreshed when needed, so ensure the progra
 
 3. **Run as Limited User**: When using with Exim, run as a dedicated mail user with minimal privileges.
 
-4. **Token Refresh**: OAuth2 tokens are automatically refreshed. The token file will be updated, so ensure the process has write access.
+4. **Log Privacy**: When `log_message_details` is true, Exim logs will include sanitized `From` and `Subject` header values. These values can contain personal data or sensitive business context. Set `log_message_details` to `false` when privacy matters more than per-message log detail.
 
-5. **Permission Preservation**: Token files maintain their original permissions when saved after refresh, respecting system administrator security policies.
+5. **Token Refresh**: OAuth2 tokens are automatically refreshed. The token file will be updated, so ensure the process has write access.
 
-6. **Concurrent Access**: File locking ensures safe concurrent access to token files, preventing corruption when multiple processes run simultaneously.
+6. **Permission Preservation**: Token files maintain their original permissions when saved after refresh, respecting system administrator security policies.
+
+7. **Concurrent Access**: File locking ensures safe concurrent access to token files, preventing corruption when multiple processes run simultaneously.
 
 
 ## OAuth2 Scopes
