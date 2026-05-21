@@ -7,7 +7,6 @@
   "log_message_details": true,
   "api_timeout": 30,
   "operation_timeout": 120,
-  "filter_delay": 2,
   "max_retries": 3,
   "retry_delay": 1
 }

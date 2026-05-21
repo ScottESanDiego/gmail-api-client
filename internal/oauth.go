@@ -145,7 +145,7 @@ func LoadOAuthConfig(credentialsFile string) (*oauth2.Config, error) {
 		return nil, fmt.Errorf("reading credentials file: %w", err)
 	}
 
-	// Use gmail.modify scope, which supports message import and label modification.
+	// Use gmail.modify scope, which supports message import and the API connection test.
 	oauthConfig, err := google.ConfigFromJSON(credentials, gmail.GmailModifyScope)
 	if err != nil {
 		return nil, fmt.Errorf("parsing credentials: %w", err)

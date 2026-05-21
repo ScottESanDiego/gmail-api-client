@@ -41,8 +41,8 @@ func main() {
 		log.Fatalf("Unable to read credentials file: %v", err)
 	}
 
-	// Parse OAuth2 config with required scopes
-	// gmail.modify supports message import and label modification.
+	// Parse OAuth2 config with required scopes.
+	// gmail.modify supports message import and the API connection test.
 	config, err := google.ConfigFromJSON(credentials, gmail.GmailModifyScope)
 	if err != nil {
 		log.Fatalf("Unable to parse credentials: %v", err)
