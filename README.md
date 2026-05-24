@@ -15,7 +15,6 @@ This repository contains one transport program:
 - Non-interactive operation using pre-authorized OAuth2 tokens
 - Configurable via JSON configuration file
 - Uses Gmail's Import API for standard delivery scanning and classification
-- Leaves final mailbox labels to Gmail's import, classification, and filter behavior
 - Automatic retry with exponential backoff for transient failures
 - Token validation before message read to prevent message loss
 - Concurrent-safe token refresh with file locking
@@ -92,6 +91,7 @@ Edit `config.json` to match your setup:
   "log_message_details": true,
   "api_timeout": 30,
   "operation_timeout": 120,
+  "filter_delay": 2,
   "max_retries": 3,
   "retry_delay": 1
 }
@@ -109,6 +109,7 @@ Edit `config.json` to match your setup:
 - `log_message_details`: Include sanitized sender and subject details in the Exim-visible success log line (default: true when omitted)
 - `api_timeout`: Timeout for individual Gmail API calls in seconds (default: 30)
 - `operation_timeout`: Overall timeout for the entire operation in seconds (default: 120)
+- `filter_delay`: Delay in seconds to wait for Gmail filters to process after message delivery (default: 2)
 
 ## Reliability Features
 
@@ -324,7 +325,7 @@ This setting affects the success line written to stdout. Verbose/debug logging m
 ## OAuth2 Scopes
 
 **gmail-api-transport** requires:
-- `https://www.googleapis.com/auth/gmail.modify` - Import messages and run the API connection test
+- `https://www.googleapis.com/auth/gmail.modify` - Read, compose, and send emails
 
 **Use gmail-api-transport when:**
 - You want Gmail Import API delivery with standard scanning and classification

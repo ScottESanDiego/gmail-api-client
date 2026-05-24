@@ -11,6 +11,7 @@ import (
 	"net/mail"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -33,6 +34,8 @@ type Config struct {
 	APITimeout int `json:"api_timeout"`
 	// Overall operation timeout in seconds (default: 120)
 	OperationTimeout int `json:"operation_timeout"`
+	// Filter processing delay in seconds (default: 2)
+	FilterDelay int `json:"filter_delay"`
 }
 
 type MessageLogInfo struct {
@@ -287,15 +290,22 @@ func validateConfig(cfg *Config) error {
 	// Set timeout defaults if not specified
 	internal.SetDefaults(&cfg.APITimeout, 30)
 	internal.SetDefaults(&cfg.OperationTimeout, 120)
+	internal.SetDefaults(&cfg.FilterDelay, 2)
 
 	logger.Debug("defaults applied",
 		"api_timeout", cfg.APITimeout,
 		"operation_timeout", cfg.OperationTimeout,
+		"filter_delay", cfg.FilterDelay,
 		"max_retries", cfg.MaxRetries,
 		"retry_delay", cfg.RetryDelay)
 
 	// Validate timeout values are reasonable
 	if err := internal.ValidateTimeout(cfg.APITimeout, cfg.OperationTimeout); err != nil {
+		return err
+	}
+
+	// Validate delay
+	if err := internal.ValidateDelay(cfg.FilterDelay, 30, "filter_delay"); err != nil {
 		return err
 	}
 
@@ -392,7 +402,7 @@ func deliverMessage(parentCtx context.Context, cfg *Config, rawMessage []byte) e
 	encodedMessage := base64.RawURLEncoding.EncodeToString(rawMessage)
 	logger.Debug("message encoded", "encoded_bytes", len(encodedMessage))
 
-	// Create the message object without labels so Gmail import determines placement.
+	// Create the message object without labels - let Gmail apply filters first
 	message := &gmail.Message{
 		Raw: encodedMessage,
 	}
@@ -438,7 +448,110 @@ func deliverMessage(parentCtx context.Context, cfg *Config, rawMessage []byte) e
 		"message_id", result.Id,
 		"thread_id", result.ThreadId)
 	if len(result.LabelIds) > 0 {
-		logger.Debug("labels", "labels", result.LabelIds)
+		logger.Debug("initial labels", "labels", result.LabelIds)
+	}
+
+	// Wait for Gmail filters to apply (labels may be applied asynchronously)
+	filterDelay := time.Duration(cfg.FilterDelay) * time.Second
+	logger.Debug("waiting for Gmail filters to process", "delay", filterDelay)
+	select {
+	case <-time.After(filterDelay):
+	case <-operationCtx.Done():
+		return fmt.Errorf("operation timed out while waiting for Gmail filters: %w", operationCtx.Err())
+	}
+
+	// Re-fetch the message to get updated labels after filters have run
+	// Wrap in retry logic
+	err = internal.RetryOperationWithContext(operationCtx, retryCfg, logger, func() error {
+		ctx, cancel := context.WithTimeout(operationCtx, time.Duration(cfg.APITimeout)*time.Second)
+		defer cancel()
+
+		var fetchErr error
+		result, fetchErr = service.Users.Messages.Get(cfg.UserID, result.Id).Format("metadata").Context(ctx).Do()
+		return fetchErr
+	}, "message re-fetch")
+
+	if err != nil {
+		// Non-fatal: continue even if re-fetch fails
+		logger.Warn("failed to re-fetch message, continuing with original labels", "error", err)
+	} else {
+		logger.Debug("labels after filter processing", "labels", result.LabelIds)
+	}
+
+	// Attempt to apply labels - failures are non-fatal
+	if err := applyLabels(operationCtx, service, cfg, result); err != nil {
+		// Log warning but don't fail the delivery
+		logger.Warn("label modification had issues", "error", err)
+		fmt.Fprintf(os.Stderr, "WARNING: Message delivered but label modification failed: %v\n", err)
+	}
+
+	return nil
+}
+
+// applyLabels applies INBOX and UNREAD labels as needed
+func applyLabels(ctx context.Context, service *gmail.Service, cfg *Config, result *gmail.Message) error {
+	// Check if Gmail applied any user labels (from filters)
+	// If not, add INBOX label so message appears in inbox
+	hasUserLabel := false
+	for _, label := range result.LabelIds {
+		// System labels start with uppercase, user labels are IDs
+		// Check for common system labels
+		if label != "UNREAD" && label != "IMPORTANT" && label != "CATEGORY_PERSONAL" &&
+			label != "CATEGORY_SOCIAL" && label != "CATEGORY_PROMOTIONS" &&
+			label != "CATEGORY_UPDATES" && label != "CATEGORY_FORUMS" {
+			hasUserLabel = true
+			break
+		}
+	}
+
+	// If no user labels and not already in INBOX, add INBOX label
+	hasInbox := slices.Contains(result.LabelIds, "INBOX")
+
+	retryCfg := &internal.RetryConfig{
+		MaxRetries: cfg.MaxRetries,
+		RetryDelay: cfg.RetryDelay,
+	}
+
+	if !hasUserLabel && !hasInbox {
+		logger.Debug("no user labels applied, adding INBOX label")
+		// Add INBOX and UNREAD labels to the message with retry logic
+		err := internal.RetryOperationWithContext(ctx, retryCfg, logger, func() error {
+			apiCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.APITimeout)*time.Second)
+			defer cancel()
+
+			modifyReq := &gmail.ModifyMessageRequest{
+				AddLabelIds: []string{"INBOX", "UNREAD"},
+			}
+			_, modifyErr := service.Users.Messages.Modify(cfg.UserID, result.Id, modifyReq).Context(apiCtx).Do()
+			return modifyErr
+		}, "add INBOX and UNREAD labels")
+
+		if err != nil {
+			return fmt.Errorf("failed to add INBOX and UNREAD labels: %w", err)
+		}
+		logger.Debug("INBOX and UNREAD labels added successfully")
+	} else {
+		// Even if message has labels or is in INBOX, ensure it's marked UNREAD
+		hasUnread := slices.Contains(result.LabelIds, "UNREAD")
+
+		if !hasUnread {
+			logger.Debug("adding UNREAD label")
+			err := internal.RetryOperationWithContext(ctx, retryCfg, logger, func() error {
+				apiCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.APITimeout)*time.Second)
+				defer cancel()
+
+				modifyReq := &gmail.ModifyMessageRequest{
+					AddLabelIds: []string{"UNREAD"},
+				}
+				_, modifyErr := service.Users.Messages.Modify(cfg.UserID, result.Id, modifyReq).Context(apiCtx).Do()
+				return modifyErr
+			}, "add UNREAD label")
+
+			if err != nil {
+				return fmt.Errorf("failed to add UNREAD label: %w", err)
+			}
+			logger.Debug("UNREAD label added successfully")
+		}
 	}
 
 	return nil
