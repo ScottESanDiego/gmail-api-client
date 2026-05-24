@@ -1,3 +1,6 @@
+> [!WARNING]
+> This repo has been migrated to codeberg.  Go to <https://codeberg.org/scotte/gmail-api-client> for the latest.
+
 # Gmail API Transport
 
 Non-interactive Go program that reads email messages from stdin and delivers them to Gmail. Designed for integration with mail transfer agents like Exim.
