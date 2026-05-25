@@ -91,7 +91,7 @@ Edit `config.json` to match your setup:
   "log_message_details": true,
   "api_timeout": 30,
   "operation_timeout": 120,
-  "filter_delay": 2,
+  "filter_delay": 10,
   "max_retries": 3,
   "retry_delay": 1
 }
@@ -109,7 +109,7 @@ Edit `config.json` to match your setup:
 - `log_message_details`: Include sanitized sender and subject details in the Exim-visible success log line (default: true when omitted)
 - `api_timeout`: Timeout for individual Gmail API calls in seconds (default: 30)
 - `operation_timeout`: Overall timeout for the entire operation in seconds (default: 120)
-- `filter_delay`: Delay in seconds to wait for Gmail filters to process after message delivery (default: 2)
+- `filter_delay`: Delay in seconds to wait for Gmail filters to process after message delivery (default: 10)
 
 ## Reliability Features
 

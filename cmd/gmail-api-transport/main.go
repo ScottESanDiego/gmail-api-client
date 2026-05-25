@@ -33,7 +33,7 @@ type Config struct {
 	APITimeout int `json:"api_timeout"`
 	// Overall operation timeout in seconds (default: 120)
 	OperationTimeout int `json:"operation_timeout"`
-	// Filter processing delay in seconds (default: 2)
+	// Filter processing delay in seconds (default: 10)
 	FilterDelay int `json:"filter_delay"`
 }
 
@@ -289,7 +289,7 @@ func validateConfig(cfg *Config) error {
 	// Set timeout defaults if not specified
 	internal.SetDefaults(&cfg.APITimeout, 30)
 	internal.SetDefaults(&cfg.OperationTimeout, 120)
-	internal.SetDefaults(&cfg.FilterDelay, 2)
+	internal.SetDefaults(&cfg.FilterDelay, 10)
 
 	logger.Debug("defaults applied",
 		"api_timeout", cfg.APITimeout,
