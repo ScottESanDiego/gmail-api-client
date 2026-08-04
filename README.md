@@ -1,5 +1,6 @@
-> [!WARNING]
-> This repo has been migrated to codeberg.  Go to <https://codeberg.org/scotte/gmail-api-client> for the latest.
+> [!NOTE]
+> This repo was previously migrated to Codeberg but is now back on Github since Codeberg
+> has an explicitly anti-AI policy, and I use LLM coding assistants.
 
 # Gmail API Transport
 
