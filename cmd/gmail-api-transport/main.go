@@ -11,7 +11,6 @@ import (
 	"net/mail"
 	"os"
 	"os/signal"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -34,7 +33,7 @@ type Config struct {
 	APITimeout int `json:"api_timeout"`
 	// Overall operation timeout in seconds (default: 120)
 	OperationTimeout int `json:"operation_timeout"`
-	// Filter processing delay in seconds (default: 2)
+	// Filter processing delay in seconds (default: 10)
 	FilterDelay int `json:"filter_delay"`
 }
 
@@ -290,7 +289,7 @@ func validateConfig(cfg *Config) error {
 	// Set timeout defaults if not specified
 	internal.SetDefaults(&cfg.APITimeout, 30)
 	internal.SetDefaults(&cfg.OperationTimeout, 120)
-	internal.SetDefaults(&cfg.FilterDelay, 2)
+	internal.SetDefaults(&cfg.FilterDelay, 10)
 
 	logger.Debug("defaults applied",
 		"api_timeout", cfg.APITimeout,
@@ -467,7 +466,11 @@ func deliverMessage(parentCtx context.Context, cfg *Config, rawMessage []byte) e
 		defer cancel()
 
 		var fetchErr error
-		result, fetchErr = service.Users.Messages.Get(cfg.UserID, result.Id).Format("metadata").Context(ctx).Do()
+		result, fetchErr = service.Users.Messages.Get(cfg.UserID, result.Id).
+			Format("metadata").
+			Fields("id", "threadId", "labelIds").
+			Context(ctx).
+			Do()
 		return fetchErr
 	}, "message re-fetch")
 
@@ -490,30 +493,15 @@ func deliverMessage(parentCtx context.Context, cfg *Config, rawMessage []byte) e
 
 // applyLabels applies INBOX and UNREAD labels as needed
 func applyLabels(ctx context.Context, service *gmail.Service, cfg *Config, result *gmail.Message) error {
-	// Check if Gmail applied any user labels (from filters)
-	// If not, add INBOX label so message appears in inbox
-	hasUserLabel := false
-	for _, label := range result.LabelIds {
-		// System labels start with uppercase, user labels are IDs
-		// Check for common system labels
-		if label != "UNREAD" && label != "IMPORTANT" && label != "CATEGORY_PERSONAL" &&
-			label != "CATEGORY_SOCIAL" && label != "CATEGORY_PROMOTIONS" &&
-			label != "CATEGORY_UPDATES" && label != "CATEGORY_FORUMS" {
-			hasUserLabel = true
-			break
-		}
-	}
-
-	// If no user labels and not already in INBOX, add INBOX label
-	hasInbox := slices.Contains(result.LabelIds, "INBOX")
+	labels := inspectLabels(result.LabelIds)
 
 	retryCfg := &internal.RetryConfig{
 		MaxRetries: cfg.MaxRetries,
 		RetryDelay: cfg.RetryDelay,
 	}
 
-	if !hasUserLabel && !hasInbox {
-		logger.Debug("no user labels applied, adding INBOX label")
+	if !labels.hasDeliveryLabel && !labels.hasInbox {
+		logger.Debug("no delivery labels applied, adding INBOX and UNREAD labels")
 		// Add INBOX and UNREAD labels to the message with retry logic
 		err := internal.RetryOperationWithContext(ctx, retryCfg, logger, func() error {
 			apiCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.APITimeout)*time.Second)
@@ -532,9 +520,7 @@ func applyLabels(ctx context.Context, service *gmail.Service, cfg *Config, resul
 		logger.Debug("INBOX and UNREAD labels added successfully")
 	} else {
 		// Even if message has labels or is in INBOX, ensure it's marked UNREAD
-		hasUnread := slices.Contains(result.LabelIds, "UNREAD")
-
-		if !hasUnread {
+		if !labels.hasUnread {
 			logger.Debug("adding UNREAD label")
 			err := internal.RetryOperationWithContext(ctx, retryCfg, logger, func() error {
 				apiCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.APITimeout)*time.Second)
@@ -555,4 +541,38 @@ func applyLabels(ctx context.Context, service *gmail.Service, cfg *Config, resul
 	}
 
 	return nil
+}
+
+type labelInspection struct {
+	hasDeliveryLabel bool
+	hasInbox         bool
+	hasUnread        bool
+}
+
+func inspectLabels(labelIDs []string) labelInspection {
+	var labels labelInspection
+	for _, labelID := range labelIDs {
+		switch labelID {
+		case "INBOX":
+			labels.hasInbox = true
+		case "UNREAD":
+			labels.hasUnread = true
+		}
+
+		if isDeliveryLabel(labelID) {
+			labels.hasDeliveryLabel = true
+		}
+	}
+	return labels
+}
+
+func isDeliveryLabel(labelID string) bool {
+	switch labelID {
+	case "INBOX", "UNREAD", "IMPORTANT",
+		"CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS",
+		"CATEGORY_UPDATES", "CATEGORY_FORUMS":
+		return false
+	default:
+		return true
+	}
 }
